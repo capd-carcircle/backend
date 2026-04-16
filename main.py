@@ -7,7 +7,9 @@ from app.api.v1 import api_router
 from app.core.auth import hash_password
 from app.core.database import Base, SessionLocal, engine
 from app.models.user import User, UserRole
-from app.models import record as _record_models  # noqa: F401 – daily_records, exchange_records 테이블 생성용
+from app.models import record as _record_models   # noqa: F401 – daily_records, exchange_records
+from app.models import survey as _survey_models   # noqa: F401 – survey_responses, rejected_q_patterns
+from app.models import question as _question_models  # noqa: F401 – common_questions, ai_questions
 
 
 def _seed_dev_data():
@@ -28,17 +30,22 @@ def _seed_dev_data():
                     password_hash=hash_password(u["password"]),
                 ))
         db.commit()
+        print("[startup] 테스트 계정 확인 완료")
+    except Exception as e:
+        db.rollback()
+        print(f"[startup] 시딩 오류: {e}")
     finally:
         db.close()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 서버 시작 시
-    Base.metadata.create_all(bind=engine)  # 테이블 자동 생성
-    _seed_dev_data()                        # 테스트 계정 생성
+    # 앱 시작 시 테이블 생성 + 더미 데이터 삽입
+    print("[startup] DB 테이블 생성 중...")
+    Base.metadata.create_all(bind=engine)
+    print("[startup] DB 테이블 생성 완료")
+    _seed_dev_data()
     yield
-    # 서버 종료 시 (필요 시 정리 로직)
 
 
 app = FastAPI(
