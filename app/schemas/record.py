@@ -48,6 +48,18 @@ class DailyRecordCreate(BaseModel):
         return v
 
 
+class DailyRecordUpdate(BaseModel):
+    """PATCH용 — 모든 필드 선택"""
+    turbid_peritoneal: Optional[bool] = None
+    weight: Optional[float] = None
+    blood_pressure: Optional[str] = None
+    urine_count: Optional[int] = None
+    total_ultrafiltration: Optional[float] = None
+    fasting_blood_glucose: Optional[float] = None
+    memo: Optional[str] = None
+    exchange_records: Optional[List[ExchangeRecordCreate]] = None
+
+
 class DailyRecordResponse(BaseModel):
     id: int
     patient_id: int

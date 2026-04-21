@@ -20,3 +20,11 @@ pydantic-settings==2.5.2
 
 # Settings
 python-dotenv==1.0.1
+
+# LLM (LM Studio / OpenAI compatible)
+openai>=1.0.0
+
+# RAG
+pgvector>=0.3.0
+sentence-transformers>=3.0.0
+pypdf>=4.0.0

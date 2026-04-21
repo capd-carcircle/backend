@@ -14,6 +14,8 @@ from app.models.survey import SurveyResponse, RejectedQPattern
 from app.models.user import User, UserRole
 from app.schemas.question import AIQuestionResponse
 from app.schemas.survey import SurveySubmitRequest, SurveySubmitResponse
+from app.services.ai_service import generate_questions_via_lm_studio
+from app.services.rag_service import search_kdigo_context
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/surveys", tags=["설문"])
@@ -160,9 +162,9 @@ def get_survey_responses(
     return result
 
 
-# ── AI 질문 생성 (규칙 기반 + 선택적 Gemini) ──────────────
+# ── AI 질문 생성 (규칙 기반 + LM Studio) ──────────────────
 def _generate_ai_questions(db: Session, record: DailyRecord, max_q: int = 3) -> list:
-    """KDIGO 기반 규칙으로 이상 징후 탐지 → 맞춤 질문 생성"""
+    """KDIGO 기반 규칙으로 이상 징후 탐지 → 맞춤 질문 생성, 부족하면 LM Studio 보완"""
     recent = (
         db.query(DailyRecord)
         .filter(
@@ -224,17 +226,26 @@ def _generate_ai_questions(db: Session, record: DailyRecord, max_q: int = 3) -> 
         if rule["check"](recent):
             generated.append({"question_text": rule["question"], "reason": rule["reason"]})
 
-    # Gemini 보완 (GEMINI_API_KEY 설정 시)
-    try:
-        from app.core.config import settings
-        if settings.GEMINI_API_KEY and len(generated) < max_q:
-            llm_qs = _generate_via_gemini(record, recent, rejected_keys)
-            for q in llm_qs:
-                if len(generated) >= max_q:
-                    break
-                generated.append(q)
-    except Exception as e:
-        logger.warning(f"Gemini 질문 생성 실패: {e}")
+    # LM Studio 보완 (규칙으로 부족할 때)
+    if len(generated) < max_q:
+        record_data = {
+            "weight": float(record.weight) if record.weight else None,
+            "blood_pressure": record.blood_pressure,
+            "total_uf": float(record.total_ultrafiltration) if record.total_ultrafiltration else None,
+            "turbid": record.turbid_peritoneal,
+            "blood_sugar": float(record.fasting_blood_glucose) if record.fasting_blood_glucose else None,
+            "memo": record.memo,
+            "recent_uf_7d": [float(r.total_ultrafiltration) for r in recent if r.total_ultrafiltration],
+        }
+        # RAG: 환자 기록과 관련된 KDIGO 문단 검색
+        kdigo_context = search_kdigo_context(record_data, db)
+        lm_questions = generate_questions_via_lm_studio(
+            record_data, list(rejected_keys), kdigo_context=kdigo_context
+        )
+        for q in lm_questions:
+            if len(generated) >= max_q:
+                break
+            generated.append(q)
 
     return generated
 
@@ -265,38 +276,3 @@ def _check_weight_increase(records):
 def _check_blood_sugar(records):
     return bool(records and records[0].fasting_blood_glucose
                 and float(records[0].fasting_blood_glucose) > 180)
-
-
-def _generate_via_gemini(record, recent, rejected_keys):
-    import google.generativeai as genai
-    from app.core.config import settings
-
-    genai.configure(api_key=settings.GEMINI_API_KEY)
-    model = genai.GenerativeModel(settings.GEMINI_MODEL)
-
-    summary = {
-        "weight": float(record.weight) if record.weight else None,
-        "blood_pressure": record.blood_pressure,
-        "total_uf": float(record.total_ultrafiltration) if record.total_ultrafiltration else None,
-        "turbid": record.turbid_peritoneal,
-        "blood_sugar": float(record.fasting_blood_glucose) if record.fasting_blood_glucose else None,
-        "memo": record.memo,
-        "recent_uf_7d": [float(r.total_ultrafiltration) for r in recent if r.total_ultrafiltration],
-    }
-
-    prompt = f"""당신은 CAPD(복막투석) 환자를 돕는 의료 AI입니다.
-오늘 투석 기록을 보고, KDIGO 가이드라인 기반으로 의사가 추가로 확인할 증상을 환자에게 묻는 질문 1개를 생성하세요.
-
-기록: {json.dumps(summary, ensure_ascii=False)}
-거절된 패턴: {list(rejected_keys)}
-
-JSON만 응답: {{"question_text": "...", "reason": "..."}}"""
-
-    resp = model.generate_content(prompt)
-    text = resp.text.strip()
-    if "```json" in text:
-        text = text.split("```json")[1].split("```")[0].strip()
-    elif "```" in text:
-        text = text.split("```")[1].split("```")[0].strip()
-    data = json.loads(text)
-    return [data] if isinstance(data, dict) else data

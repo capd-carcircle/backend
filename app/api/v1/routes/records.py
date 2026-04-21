@@ -5,12 +5,18 @@ from sqlalchemy.orm import Session
 
 from app.core.auth import get_current_user
 from app.core.database import get_db
-from app.crud.daily_record import create_daily_record, get_patient_records, get_record_by_id
+from app.crud.daily_record import (
+    create_daily_record,
+    delete_daily_record,
+    get_patient_records,
+    get_record_by_id,
+    update_daily_record,
+)
 from app.models.question import AIQuestion, AIQuestionStatus, CommonQuestion
 from app.models.record import DailyRecord, ExchangeRecord, RecordStatus
 from app.models.survey import SurveyResponse
 from app.models.user import User, UserRole
-from app.schemas.record import DailyRecordCreate, DailyRecordResponse
+from app.schemas.record import DailyRecordCreate, DailyRecordResponse, DailyRecordUpdate
 
 router = APIRouter(prefix="/records", tags=["기록"])
 
@@ -74,6 +80,51 @@ def get_record(
     if record.patient_id != current_user.id:
         raise HTTPException(status_code=403, detail="접근 권한이 없습니다.")
     return record
+
+
+# ── 환자: 기록 수정 ────────────────────────────────────────
+@router.patch(
+    "/{record_id}",
+    response_model=DailyRecordResponse,
+    summary="일일 기록 수정 (submitted 상태만)",
+)
+def update_record(
+    record_id: int,
+    payload: DailyRecordUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    _require_patient(current_user)
+    record = get_record_by_id(db, record_id=record_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="기록을 찾을 수 없습니다.")
+    if record.patient_id != current_user.id:
+        raise HTTPException(status_code=403, detail="접근 권한이 없습니다.")
+    if record.status != RecordStatus.submitted:
+        raise HTTPException(status_code=409, detail="검토가 완료된 기록은 수정할 수 없습니다.")
+    return update_daily_record(db, record=record, data=payload)
+
+
+# ── 환자: 기록 삭제 ────────────────────────────────────────
+@router.delete(
+    "/{record_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="일일 기록 삭제 (submitted 상태만)",
+)
+def delete_record(
+    record_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    _require_patient(current_user)
+    record = get_record_by_id(db, record_id=record_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="기록을 찾을 수 없습니다.")
+    if record.patient_id != current_user.id:
+        raise HTTPException(status_code=403, detail="접근 권한이 없습니다.")
+    if record.status != RecordStatus.submitted:
+        raise HTTPException(status_code=409, detail="검토가 완료된 기록은 삭제할 수 없습니다.")
+    delete_daily_record(db, record=record)
 
 
 # ── 의사: 기록 상세 조회 ───────────────────────────────────
@@ -190,6 +241,33 @@ def approve_record(
     db.refresh(record)
 
     return {"success": True, "message": "기록이 승인되었습니다.", "record_id": record_id}
+
+
+# ── 의사: 승인 취소 (reviewed → submitted) ─────────────────
+@router.patch(
+    "/{record_id}/revert",
+    summary="승인 취소 — 검토 중으로 되돌리기 (의사용)",
+)
+def revert_record(
+    record_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    _require_doctor(current_user)
+
+    record = db.query(DailyRecord).filter(DailyRecord.id == record_id).first()
+    if not record:
+        raise HTTPException(status_code=404, detail="기록을 찾을 수 없습니다.")
+    if record.status != RecordStatus.reviewed:
+        raise HTTPException(status_code=409, detail="승인된 기록이 아닙니다.")
+
+    record.status      = RecordStatus.submitted
+    record.approved_by = None
+    record.updated_at  = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(record)
+
+    return {"success": True, "message": "검토 중으로 되돌렸습니다.", "record_id": record_id}
 
 
 # ── AI 요약 빌더 (규칙 기반) ───────────────────────────────

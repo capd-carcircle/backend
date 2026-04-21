@@ -10,6 +10,7 @@ from app.models.user import User, UserRole
 from app.models import record as _record_models   # noqa: F401 – daily_records, exchange_records
 from app.models import survey as _survey_models   # noqa: F401 – survey_responses, rejected_q_patterns
 from app.models import question as _question_models  # noqa: F401 – common_questions, ai_questions
+from app.models import chunk as _chunk_models        # noqa: F401 – document_chunks
 
 
 def _seed_dev_data():
