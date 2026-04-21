@@ -69,7 +69,7 @@ def generate_questions_via_lm_studio(
 {{"question_text": "질문 내용", "reason": "이 질문을 생성한 이유"}}"""
 
         response = client.chat.completions.create(
-            model="qwen2.5-3b-instruct",  # LM Studio에 로드된 모델명
+            model="qwen2.5-3b-instruct.gguf",  # LM Studio 실제 모델명 (.gguf 포함)
             messages=[
                 {"role": "user", "content": prompt}
             ],
