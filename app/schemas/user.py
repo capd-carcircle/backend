@@ -1,10 +1,10 @@
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel
 from app.models.user import UserRole
 
 
 # ── 로그인 요청 ────────────────────────────────────────────────
 class LoginRequest(BaseModel):
-    email: EmailStr
+    phone_number: str
     password: str
 
 
@@ -20,7 +20,7 @@ class TokenResponse(BaseModel):
 # ── 유저 정보 응답 ─────────────────────────────────────────────
 class UserResponse(BaseModel):
     id: int
-    email: str
+    phone_number: str
     name: str
     role: UserRole
     is_active: bool

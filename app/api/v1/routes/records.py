@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.core.auth import get_current_user
@@ -82,11 +82,11 @@ def get_record(
     return record
 
 
-# ── 환자: 기록 수정 ────────────────────────────────────────
+# ── 환자: 기록 수정 (draft 상태만 가능) ───────────────────
 @router.patch(
     "/{record_id}",
     response_model=DailyRecordResponse,
-    summary="일일 기록 수정 (submitted 상태만)",
+    summary="일일 기록 수정 (draft 상태만)",
 )
 def update_record(
     record_id: int,
@@ -100,9 +100,77 @@ def update_record(
         raise HTTPException(status_code=404, detail="기록을 찾을 수 없습니다.")
     if record.patient_id != current_user.id:
         raise HTTPException(status_code=403, detail="접근 권한이 없습니다.")
-    if record.status != RecordStatus.submitted:
-        raise HTTPException(status_code=409, detail="검토가 완료된 기록은 수정할 수 없습니다.")
-    return update_daily_record(db, record=record, data=payload)
+    if record.status != RecordStatus.draft:
+        raise HTTPException(status_code=409, detail="최종 제출된 기록은 수정할 수 없습니다.")
+
+    updated = update_daily_record(db, record=record, data=payload)
+
+    return updated
+
+
+# ── 환자: 기록 최종 제출 (draft → submitted + AI 생성) ─────
+@router.post(
+    "/{record_id}/submit",
+    response_model=DailyRecordResponse,
+    summary="임시저장 기록 최종 제출",
+)
+def finalize_record(
+    record_id: int,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    _require_patient(current_user)
+    record = get_record_by_id(db, record_id=record_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="기록을 찾을 수 없습니다.")
+    if record.patient_id != current_user.id:
+        raise HTTPException(status_code=403, detail="접근 권한이 없습니다.")
+    if record.status != RecordStatus.draft:
+        raise HTTPException(status_code=409, detail="이미 제출된 기록입니다.")
+
+    # draft → submitted
+    record.status = RecordStatus.submitted
+    record.submitted_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(record)
+
+    # AI 질문 생성 (규칙 기반 즉시 + LM Studio 백그라운드)
+    from app.api.v1.routes.surveys import (
+        _generate_rule_based,
+        _lm_question_background,
+        _lm_in_progress,
+        MAX_AI_QUESTIONS,
+    )
+
+    # 기존 AI 질문 초기화
+    db.query(AIQuestion).filter(
+        AIQuestion.daily_record_id == record_id
+    ).delete()
+    db.commit()
+
+    rule_questions, record_data, rejected_keys = _generate_rule_based(db, record)
+    for q_data in rule_questions:
+        db.add(AIQuestion(
+            daily_record_id=record_id,
+            patient_id=current_user.id,
+            question_text=q_data["question_text"],
+            reason=q_data.get("reason"),
+        ))
+    db.commit()
+
+    if len(rule_questions) < MAX_AI_QUESTIONS:
+        _lm_in_progress.add(record_id)
+        background_tasks.add_task(
+            _lm_question_background,
+            record_id=record_id,
+            patient_id=current_user.id,
+            record_data=record_data,
+            rejected_keys=list(rejected_keys),
+        )
+
+    db.refresh(record)
+    return record
 
 
 # ── 환자: 기록 삭제 ────────────────────────────────────────
@@ -122,7 +190,7 @@ def delete_record(
         raise HTTPException(status_code=404, detail="기록을 찾을 수 없습니다.")
     if record.patient_id != current_user.id:
         raise HTTPException(status_code=403, detail="접근 권한이 없습니다.")
-    if record.status != RecordStatus.submitted:
+    if record.status not in (RecordStatus.draft, RecordStatus.submitted):
         raise HTTPException(status_code=409, detail="검토가 완료된 기록은 삭제할 수 없습니다.")
     delete_daily_record(db, record=record)
 
@@ -164,29 +232,41 @@ def get_record_detail(
         for e in exchanges
     ]
 
-    # ── 설문 응답 ──────────────────────────────────────────
+    # ── 설문: 전체 질문 + 답변 (미답변 포함) ─────────────────
     responses = (
         db.query(SurveyResponse)
         .filter(SurveyResponse.daily_record_id == record_id)
         .all()
     )
-    survey_out = []
-    for r in responses:
-        if r.question_type == "common":
-            q = db.query(CommonQuestion).filter(CommonQuestion.id == r.question_id).first()
-            q_text  = q.question_text if q else "(삭제된 질문)"
-            q_reason = None
-        else:
-            q = db.query(AIQuestion).filter(AIQuestion.id == r.question_id).first()
-            q_text  = q.question_text if q else "(삭제된 질문)"
-            q_reason = q.reason if q else None
+    resp_map = {(r.question_id, r.question_type): r for r in responses}
 
+    survey_out = []
+
+    # 공통 질문 (활성화된 것)
+    for q in db.query(CommonQuestion).filter(CommonQuestion.is_active == True).all():
+        r = resp_map.get((q.id, "common"))
         survey_out.append({
-            "question_type": r.question_type,
-            "question_text": q_text,
-            "reason":        q_reason,
-            "choice":        r.choice.value if r.choice else None,
-            "text_answer":   r.text_answer,
+            "question_type": "common",
+            "question_text": q.question_text,
+            "reason":        None,
+            "choice":        r.choice.value if r and r.choice else None,
+            "text_answer":   r.text_answer if r else None,
+            "answered":      r is not None,
+        })
+
+    # AI 질문 (이 기록용)
+    for q in db.query(AIQuestion).filter(
+        AIQuestion.daily_record_id == record_id,
+        AIQuestion.status != "rejected_global",
+    ).all():
+        r = resp_map.get((q.id, "ai"))
+        survey_out.append({
+            "question_type": "ai",
+            "question_text": q.question_text,
+            "reason":        q.reason,
+            "choice":        r.choice.value if r and r.choice else None,
+            "text_answer":   r.text_answer if r else None,
+            "answered":      r is not None,
         })
 
     # ── AI 요약 (규칙 기반) ────────────────────────────────

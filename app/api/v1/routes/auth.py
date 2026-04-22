@@ -7,7 +7,7 @@ from app.core.auth import (
     get_current_user,
 )
 from app.core.database import get_db
-from app.crud.user import get_user_by_email
+from app.crud.user import get_user_by_phone
 from app.schemas.user import LoginRequest, TokenResponse, UserResponse
 
 router = APIRouter(prefix="/auth", tags=["인증"])
@@ -15,13 +15,13 @@ router = APIRouter(prefix="/auth", tags=["인증"])
 
 @router.post("/login", response_model=TokenResponse)
 def login(payload: LoginRequest, db: Session = Depends(get_db)):
-    """이메일 + 비밀번호로 로그인 → JWT 반환"""
-    user = get_user_by_email(db, email=payload.email)
+    """전화번호 + 비밀번호로 로그인 → JWT 반환"""
+    user = get_user_by_phone(db, phone_number=payload.phone_number)
 
     if not user or not verify_password(payload.password, user.password_hash):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="이메일 또는 비밀번호가 올바르지 않습니다.",
+            detail="전화번호 또는 비밀번호가 올바르지 않습니다.",
         )
     if not user.is_active:
         raise HTTPException(

@@ -23,8 +23,8 @@ def create_daily_record(
         total_ultrafiltration=data.total_ultrafiltration,
         fasting_blood_glucose=data.fasting_blood_glucose,
         memo=data.memo,
-        status=RecordStatus.submitted,
-        submitted_at=datetime.now(timezone.utc),
+        status=RecordStatus.draft,
+        submitted_at=None,
     )
     db.add(record)
     db.flush()  # PK 획득

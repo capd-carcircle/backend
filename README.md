@@ -133,6 +133,34 @@ python backend/scripts/ingest_kdigo.py
 python backend/scripts/test_rag.py
 ```
 
+### 더미 데이터 임포트
+synthetic_capd_2025 폴더를 압축 해제한 뒤 아래 명령어를 실행한다.
+
+```powershell
+# 필수 패키지 (ingest_env 사용 시 이미 설치됨)
+pip install bcrypt sqlalchemy psycopg2-binary python-dotenv
+
+$env:DATABASE_URL = "postgresql://capd_user:capd_pass@localhost:5432/capd"
+
+# 기본 실행 (2025-12-01 ~ 2025-12-31, 비밀번호 capd1234)
+python backend/scripts/import_capd_data.py --data-dir ./synthetic_capd_2025/synthetic_capd_2025
+
+# 날짜 범위 변경
+python backend/scripts/import_capd_data.py --data-dir ./synthetic_capd_2025/synthetic_capd_2025 `
+    --start 2025-11-01 --end 2025-11-30
+
+# 기존 더미 데이터 초기화 후 재삽입
+python backend/scripts/import_capd_data.py --data-dir ./synthetic_capd_2025/synthetic_capd_2025 --clear
+```
+
+**생성되는 계정** (비밀번호 공통: `capd1234`)
+- `patient_001@capd.com` ~ `patient_010@capd.com`
+- 기존 테스트 계정(`patient1~3@capd.com`, `doctor@capd.com`)은 영향 없음
+
+**지원 포맷 (자동 감지)**
+- CSV 모드: `daily_records.csv` + `exchange_sessions.csv` 있을 때 (권장)
+- JSON 모드: `patient_XXX/YYYY-MM-DD.json` 파일만 있을 때
+
 ---
 
 ## 환경변수 (.env)

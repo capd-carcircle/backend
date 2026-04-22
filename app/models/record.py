@@ -12,7 +12,8 @@ from app.core.database import Base
 
 
 class RecordStatus(str, enum.Enum):
-    submitted = "submitted"   # 환자 제출
+    draft     = "draft"       # 임시 저장 (환자 작성 중)
+    submitted = "submitted"   # 환자 최종 제출
     reviewed  = "reviewed"    # 의사 검토 완료
     rejected  = "rejected"    # 의사 반려
 
