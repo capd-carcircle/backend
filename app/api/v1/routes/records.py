@@ -156,6 +156,7 @@ def finalize_record(
             patient_id=current_user.id,
             question_text=q_data["question_text"],
             reason=q_data.get("reason"),
+            question_type="yes_no",   # 규칙 기반 질문은 항상 yes_no
         ))
     db.commit()
 
