@@ -32,7 +32,8 @@ AI_SERVER_URL = "http://ai:8001"   # docker-compose 서비스명
 # 백그라운드 AI 질문 생성 중인 record_id 추적 (중복 실행 방지)
 _ai_in_progress: set = set()
 
-MAX_AI_QUESTIONS = 3
+MAX_AI_QUESTIONS  = 5   # 전체 AI 질문 최대 (규칙 기반 + Gemini 합산)
+MAX_RULE_QUESTIONS = 3   # 규칙 기반 질문 최대 (Gemini는 나머지 slot 채움)
 
 
 # ── GET AI 맞춤 질문 조회 ──────────────────────────────────
@@ -321,7 +322,7 @@ def _generate_rule_based(db: Session, record: DailyRecord):
 
     generated = []
     for rule in RULES:
-        if len(generated) >= MAX_AI_QUESTIONS:
+        if len(generated) >= MAX_RULE_QUESTIONS:
             break
         if rule["key"] in rejected_keys:
             continue

@@ -270,11 +270,17 @@ def get_record_detail(
             "answered":      r is not None,
         })
 
-    # ── AI 요약 (규칙 기반) ────────────────────────────────
-    ai_summary = _build_ai_summary(record, exchanges)
+    # ── AI 요약 (Gemini 우선, 없으면 규칙 기반 폴백) ──────────
+    if record.ai_summary:
+        ai_summary = record.ai_summary
+    else:
+        ai_summary = _build_ai_summary(record, exchanges)
 
-    # ── EMR 형식 ───────────────────────────────────────────
-    emr = _build_emr(record, exchanges, patient)
+    # ── EMR 형식 (Gemini emr_soap 우선, 없으면 규칙 기반 폴백) ─
+    if record.emr_soap:
+        emr = _parse_emr_soap(record.emr_soap)
+    else:
+        emr = _build_emr(record, exchanges, patient)
 
     return {
         "record_id":              record.id,
@@ -349,6 +355,21 @@ def revert_record(
     db.refresh(record)
 
     return {"success": True, "message": "검토 중으로 되돌렸습니다.", "record_id": record_id}
+
+
+# ── EMR SOAP 파서 (Gemini 결과 → dict) ────────────────────
+def _parse_emr_soap(emr_soap: str) -> dict:
+    """
+    Gemini가 생성한 "S: ...\nO: ...\nA: ...\nP: ..." 문자열을 파싱.
+    각 섹션이 없으면 빈 문자열 반환.
+    """
+    import re
+    result = {"S": "", "O": "", "A": "", "P": ""}
+    for key in ["S", "O", "A", "P"]:
+        m = re.search(rf'(?:^|\n){key}:\s*(.*?)(?=\n[SOAP]:|$)', emr_soap, re.DOTALL)
+        if m:
+            result[key] = m.group(1).strip()
+    return result
 
 
 # ── AI 요약 빌더 (규칙 기반) ───────────────────────────────
