@@ -80,7 +80,7 @@ def get_dashboard(
 		.all()
 	)
 	total_patients = len(all_patients)
-	patients_out = [PatientSummary(id=p.id, name=p.name) for p in all_patients]
+	patients_out = [PatientSummary(id=p.id, name=p.name, phone_number=p.phone_number) for p in all_patients]
 
 	# ── 해당 날짜 기록 목록 (환자 정보 JOIN) ─────────────────
 	query = (

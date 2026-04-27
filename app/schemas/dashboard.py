@@ -18,8 +18,9 @@ class DashboardRecordRow(BaseModel):
 
 class PatientSummary(BaseModel):
     """환자 필터 드롭다운용 요약"""
-    id:   int
-    name: str
+    id:           int
+    name:         str
+    phone_number: str
 
 
 class DashboardResponse(BaseModel):
