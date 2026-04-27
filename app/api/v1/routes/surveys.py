@@ -1,8 +1,8 @@
 """
 설문 API
 - 공통 질문 + AI 맞춤 질문 조회/응답
-- AI 질문 생성: ai/ 서버(포트 8001) HTTP 호출로 위임
-- 규칙 기반 질문은 백엔드에서 즉시 생성, AI 보완은 백그라운드로 처리
+- AI 질문 생성: Gemini가 KDIGO 기반으로 전담, ai/ 서버(포트 8001) 백그라운드 호출
+- 과거 추세(historical_context) 반영하여 트렌드 기반 질문 생성
 - 설문 완료 시 AI 종합 요약 트리거
 """
 import json
@@ -32,8 +32,7 @@ AI_SERVER_URL = "http://ai:8001"   # docker-compose 서비스명
 # 백그라운드 AI 질문 생성 중인 record_id 추적 (중복 실행 방지)
 _ai_in_progress: set = set()
 
-MAX_AI_QUESTIONS  = 5   # 전체 AI 질문 최대 (규칙 기반 + Gemini 합산)
-MAX_RULE_QUESTIONS = 3   # 규칙 기반 질문 최대 (Gemini는 나머지 slot 채움)
+MAX_AI_QUESTIONS = 5   # Gemini가 생성하는 AI 질문 최대 개수
 
 
 # ── GET AI 맞춤 질문 조회 ──────────────────────────────────
@@ -275,82 +274,7 @@ def get_survey_responses(
     return result
 
 
-# ── 규칙 기반 질문 생성 (즉시, 동기) ──────────────────────
-def _generate_rule_based(db: Session, record: DailyRecord):
-    """KDIGO 5가지 규칙으로 이상 징후 감지 → 즉시 질문 반환"""
-    recent = (
-        db.query(DailyRecord)
-        .filter(
-            DailyRecord.patient_id == record.patient_id,
-            DailyRecord.id <= record.id,
-        )
-        .order_by(desc(DailyRecord.record_date))
-        .limit(7)
-        .all()
-    )
-
-    rejected_keys = {
-        r.pattern for r in db.query(RejectedQPattern).filter(
-            (RejectedQPattern.patient_id == record.patient_id)
-            | (RejectedQPattern.patient_id.is_(None))
-        ).all()
-    }
-
-    RULES = [
-        {
-            "key": "uf_decrease",
-            "check": _check_uf_decrease,
-            "question": "지난 3일 간 한외여과량이 감소하고 있습니다. 수분 섭취가 평소보다 많았나요?",
-            "reason": "한외여과 감소 추세 탐지",
-        },
-        {
-            "key": "high_bp",
-            "check": _check_high_bp,
-            "question": "오늘 혈압이 평소보다 높게 측정되었습니다. 두통이나 어지러움이 있었나요?",
-            "reason": "혈압 이상 감지 (KDIGO 기준)",
-        },
-        {
-            "key": "cloudy",
-            "check": _check_cloudy,
-            "question": "투석액이 혼탁하게 나왔습니다. 복통이나 발열 증상이 있었나요?",
-            "reason": "복막염 의심 — 혼탁 투석액 감지",
-        },
-        {
-            "key": "weight_up",
-            "check": _check_weight_increase,
-            "question": "체중이 전날보다 증가했습니다. 발이나 손이 붓는 느낌이 있었나요?",
-            "reason": "체중 증가 — 수분 과부하 의심",
-        },
-        {
-            "key": "high_glucose",
-            "check": _check_blood_sugar,
-            "question": "공복 혈당이 높게 측정되었습니다. 어제 식사나 간식 섭취가 평소와 달랐나요?",
-            "reason": "공복 혈당 이상 (당뇨 관리 KDIGO 기준)",
-        },
-    ]
-
-    generated = []
-    for rule in RULES:
-        if len(generated) >= MAX_RULE_QUESTIONS:
-            break
-        if rule["key"] in rejected_keys:
-            continue
-        if rule["check"](recent):
-            generated.append({"question_text": rule["question"], "reason": rule["reason"]})
-
-    record_data = {
-        "weight":                float(record.weight) if record.weight else None,
-        "blood_pressure":        record.blood_pressure,
-        "total_ultrafiltration": float(record.total_ultrafiltration) if record.total_ultrafiltration else None,
-        "turbid_peritoneal":     record.turbid_peritoneal,
-        "fasting_blood_glucose": float(record.fasting_blood_glucose) if record.fasting_blood_glucose else None,
-        "memo":                  record.memo,
-    }
-
-    return generated, record_data, list(rejected_keys)
-
-
-# ── AI 서버 백그라운드 질문 보완 ──────────────────────────
+# ── AI 서버 백그라운드 질문 생성 (Gemini 전담) ───────────
 def _ai_question_background(
     record_id: int,
     patient_id: int,
@@ -360,8 +284,8 @@ def _ai_question_background(
 ):
     """
     백그라운드에서 ai/ 서버의 /ai-questions/generate 호출
-    → 규칙 기반으로 부족한 질문 Gemini로 보완 → DB 저장
-    historical_context가 있으면 과거 추세를 포함해 트렌드 기반 질문 생성
+    Gemini가 KDIGO 기반으로 3~5개 질문 전담 생성 → DB 저장
+    historical_context로 과거 추세 반영
     """
     db = SessionLocal()
     try:
@@ -417,38 +341,6 @@ def _ai_question_background(
     finally:
         _ai_in_progress.discard(record_id)
         db.close()
-
-
-# ── 규칙 체크 함수들 ──────────────────────────────────────
-def _check_uf_decrease(records):
-    ufs = [r.total_ultrafiltration for r in records if r.total_ultrafiltration is not None]
-    return len(ufs) >= 3 and ufs[0] < ufs[1] < ufs[2]
-
-
-def _check_high_bp(records):
-    if not records or not records[0].blood_pressure:
-        return False
-    try:
-        return int(records[0].blood_pressure.split("/")[0]) > 140
-    except Exception:
-        return False
-
-
-def _check_cloudy(records):
-    return bool(records and records[0].turbid_peritoneal)
-
-
-def _check_weight_increase(records):
-    weights = [r.weight for r in records if r.weight is not None]
-    return len(weights) >= 2 and (float(weights[0]) - float(weights[1])) >= 1.0
-
-
-def _check_blood_sugar(records):
-    return bool(
-        records
-        and records[0].fasting_blood_glucose
-        and float(records[0].fasting_blood_glucose) > 180
-    )
 
 
 # ── 과거 기록 추세 계산 ───────────────────────────────────

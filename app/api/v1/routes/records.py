@@ -135,14 +135,13 @@ def finalize_record(
     db.commit()
     db.refresh(record)
 
-    # AI 질문 생성 (규칙 기반 즉시 + AI 백그라운드)
+    # AI 질문 생성 — Gemini가 전담 (백그라운드)
     from app.api.v1.routes.surveys import (
-        _generate_rule_based,
         _ai_question_background,
         _ai_in_progress,
         _compute_historical_context,
-        MAX_AI_QUESTIONS,
     )
+    from app.models.survey import RejectedQPattern
 
     # 기존 AI 질문 초기화
     db.query(AIQuestion).filter(
@@ -150,29 +149,37 @@ def finalize_record(
     ).delete()
     db.commit()
 
-    rule_questions, record_data, rejected_keys = _generate_rule_based(db, record)
-    for q_data in rule_questions:
-        db.add(AIQuestion(
-            daily_record_id=record_id,
-            patient_id=current_user.id,
-            question_text=q_data["question_text"],
-            reason=q_data.get("reason"),
-            question_type="yes_no",   # 규칙 기반 질문은 항상 yes_no
-        ))
-    db.commit()
+    # 오늘 기록 dict 구성
+    record_data = {
+        "weight":                float(record.weight) if record.weight else None,
+        "blood_pressure":        record.blood_pressure,
+        "total_ultrafiltration": float(record.total_ultrafiltration) if record.total_ultrafiltration else None,
+        "turbid_peritoneal":     record.turbid_peritoneal,
+        "fasting_blood_glucose": float(record.fasting_blood_glucose) if record.fasting_blood_glucose else None,
+        "urine_count":           record.urine_count,
+        "memo":                  record.memo,
+    }
 
-    if len(rule_questions) < MAX_AI_QUESTIONS:
-        # 과거 추세 데이터 계산 (기록 1개부터 활용)
-        historical_context = _compute_historical_context(db, current_user.id, record_id)
-        _ai_in_progress.add(record_id)
-        background_tasks.add_task(
-            _ai_question_background,
-            record_id=record_id,
-            patient_id=current_user.id,
-            record_data=record_data,
-            rejected_keys=list(rejected_keys),
-            historical_context=historical_context,
-        )
+    # 거절된 질문 패턴 조회
+    rejected_keys = [
+        r.pattern for r in db.query(RejectedQPattern).filter(
+            (RejectedQPattern.patient_id == current_user.id)
+            | (RejectedQPattern.patient_id.is_(None))
+        ).all()
+    ]
+
+    # 과거 추세 데이터 계산 (기록 1개부터 활용)
+    historical_context = _compute_historical_context(db, current_user.id, record_id)
+
+    _ai_in_progress.add(record_id)
+    background_tasks.add_task(
+        _ai_question_background,
+        record_id=record_id,
+        patient_id=current_user.id,
+        record_data=record_data,
+        rejected_keys=rejected_keys,
+        historical_context=historical_context,
+    )
 
     db.refresh(record)
     return record
