@@ -392,12 +392,12 @@ def _parse_emr_soap(emr_soap: str) -> dict:
 def _build_ai_summary(record: DailyRecord, exchanges: list) -> str:
     parts = []
 
-    # 총 한외여과량
+    # 총 제수량
     uf = float(record.total_ultrafiltration) if record.total_ultrafiltration is not None else None
     if uf is not None:
         sign = "+" if uf > 0 else ""
         note = " (평소 대비 낮음)" if uf < 0 else " (정상 범위)"
-        parts.append(f"총 한외여과량 {sign}{uf:.0f}g{note}.")
+        parts.append(f"총 제수량 {sign}{uf:.0f}g{note}.")
 
     # 혈압
     if record.blood_pressure:
@@ -456,12 +456,12 @@ def _build_emr(record: DailyRecord, exchanges: list, patient: User) -> dict:
 
     # O
     uf_str = f"{uf:+.0f} g" if uf is not None else "미기록"
-    o = f"체중 {wt}, 혈압 {bp} mmHg, 공복혈당 {bg} / 총 한외여과량 {uf_str} / 총 배액량 {total_drain:.0f} g"
+    o = f"체중 {wt}, 혈압 {bp} mmHg, 공복혈당 {bg} / 총 제수량 {uf_str} / 총 배액량 {total_drain:.0f} g"
 
     # A
     a_items = []
     if uf is not None and uf < 0:
-        a_items.append("한외여과 부족 가능성")
+        a_items.append("제수량 부족 가능성")
     try:
         if record.blood_pressure and int(record.blood_pressure.split("/")[0]) > 140:
             a_items.append("혈압 상승 주의 필요")
