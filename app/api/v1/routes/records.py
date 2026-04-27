@@ -257,13 +257,16 @@ def get_record_detail(
     # 공통 질문 (활성화된 것)
     for q in db.query(CommonQuestion).filter(CommonQuestion.is_active == True).all():
         r = resp_map.get((q.id, "common"))
+        # text_answer가 있고 choice가 없는 경우도 answered=True로 처리
+        answered = r is not None and (r.choice is not None or bool(r.text_answer))
         survey_out.append({
-            "question_type": "common",
-            "question_text": q.question_text,
-            "reason":        None,
-            "choice":        r.choice.value if r and r.choice else None,
-            "text_answer":   r.text_answer if r else None,
-            "answered":      r is not None,
+            "question_type":      "common",
+            "question_item_type": q.question_type.value if q.question_type else "yes_no",
+            "question_text":      q.question_text,
+            "reason":             None,
+            "choice":             r.choice.value if r and r.choice else None,
+            "text_answer":        r.text_answer if r else None,
+            "answered":           answered,
         })
 
     # AI 질문 (이 기록용)
@@ -272,13 +275,15 @@ def get_record_detail(
         AIQuestion.status != "rejected_global",
     ).all():
         r = resp_map.get((q.id, "ai"))
+        answered = r is not None and (r.choice is not None or bool(r.text_answer))
         survey_out.append({
-            "question_type": "ai",
-            "question_text": q.question_text,
-            "reason":        q.reason,
-            "choice":        r.choice.value if r and r.choice else None,
-            "text_answer":   r.text_answer if r else None,
-            "answered":      r is not None,
+            "question_type":      "ai",
+            "question_item_type": q.question_type.value if q.question_type else "yes_no",
+            "question_text":      q.question_text,
+            "reason":             q.reason,
+            "choice":             r.choice.value if r and r.choice else None,
+            "text_answer":        r.text_answer if r else None,
+            "answered":           answered,
         })
 
     # ── AI 요약 (Gemini 우선, 없으면 규칙 기반 폴백) ──────────
