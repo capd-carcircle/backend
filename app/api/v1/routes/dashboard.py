@@ -2,13 +2,14 @@ from datetime import date
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.core.auth import get_current_user
 from app.core.database import get_db
 from app.models.question import AIQuestion, AIQuestionStatus
 from app.models.record import DailyRecord, RecordStatus
+from app.models.registration import PatientRegistration, RegistrationStatus
 from app.models.user import User, UserRole
 from app.schemas.dashboard import DashboardRecordRow, DashboardResponse, PatientSummary
 
@@ -45,13 +46,28 @@ def get_dashboard(
 
 	target_date = record_date or date.today()
 
-	# ── 활성 환자 목록 (드롭다운용) — 본인 담당 환자만 ──────────
+	# ── 담당 환자 ID 집합 (registrations OR doctor_id — 시드 데이터 호환) ──
+	reg_ids = (
+		db.query(PatientRegistration.user_id)
+		.filter(
+			PatientRegistration.doctor_id == current_user.id,
+			PatientRegistration.status == RegistrationStatus.completed,
+			PatientRegistration.user_id.isnot(None),
+		)
+		.subquery()
+	)
+	patient_filter = or_(
+		User.id.in_(reg_ids),
+		User.doctor_id == current_user.id,
+	)
+
+	# ── 활성 환자 목록 ────────────────────────────────────────
 	all_patients: List[User] = (
 		db.query(User)
 		.filter(
 			User.role == UserRole.patient,
 			User.is_active == True,
-			User.doctor_id == current_user.id,
+			patient_filter,
 		)
 		.order_by(User.name)
 		.all()
@@ -59,13 +75,13 @@ def get_dashboard(
 	total_patients = len(all_patients)
 	patients_out = [PatientSummary(id=p.id, name=p.name) for p in all_patients]
 
-	# ── 해당 날짜 기록 목록 (환자 정보 JOIN) — 본인 담당 환자만 ──
+	# ── 해당 날짜 기록 목록 (환자 정보 JOIN) ─────────────────
 	query = (
 		db.query(DailyRecord, User)
 		.join(User, DailyRecord.patient_id == User.id)
 		.filter(
 			DailyRecord.record_date == target_date,
-			User.doctor_id == current_user.id,
+			patient_filter,
 		)
 	)
 	if patient_id is not None:
