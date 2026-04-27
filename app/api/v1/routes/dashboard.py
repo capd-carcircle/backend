@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -61,12 +61,19 @@ def get_dashboard(
 		User.doctor_id == current_user.id,
 	)
 
-	# ── 활성 환자 목록 ────────────────────────────────────────
+	# ── target_date 당일 끝(23:59:59 UTC) ───────────────────
+	target_date_end = datetime(
+		target_date.year, target_date.month, target_date.day,
+		23, 59, 59, tzinfo=timezone.utc
+	)
+
+	# ── 활성 환자 목록 (target_date 당시 기준 — 가입일 필터) ──
 	all_patients: List[User] = (
 		db.query(User)
 		.filter(
 			User.role == UserRole.patient,
 			User.is_active == True,
+			User.created_at <= target_date_end,
 			patient_filter,
 		)
 		.order_by(User.name)
