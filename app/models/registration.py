@@ -2,7 +2,7 @@
 import enum
 from datetime import datetime, timezone
 
-from sqlalchemy import BigInteger, DateTime, Enum, ForeignKey, String, Text
+from sqlalchemy import BigInteger, DateTime, Enum, ForeignKey, String, Text, VARCHAR
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -32,8 +32,13 @@ class PatientRegistration(Base):
     hospital_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("hospitals.id", ondelete="SET NULL"), nullable=True
     )
-    doctor_id: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    # request_type: 'connect' (담당 연결 요청) | 'discharge' (담당 해제 요청)
+    request_type: Mapped[str] = mapped_column(
+        VARCHAR(20), nullable=False, default="connect", server_default="connect"
+    )
+
+    doctor_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("users.id", ondelete="CASCADE"), nullable=True
     )
 
     # 승인 흐름

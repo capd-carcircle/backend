@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.core.auth import get_current_user
 from app.core.database import get_db
+from app.models.patient_assignment import PatientDoctorAssignment
 from app.models.question import AIQuestion, AIQuestionStatus
 from app.models.record import DailyRecord, RecordStatus
 from app.models.registration import PatientRegistration, RegistrationStatus
@@ -46,25 +47,33 @@ def get_dashboard(
 
 	target_date = record_date or date.today()
 
-	# ── 담당 환자 ID 집합 (registrations OR doctor_id — 시드 데이터 호환) ──
-	reg_ids = (
-		db.query(PatientRegistration.user_id)
-		.filter(
-			PatientRegistration.doctor_id == current_user.id,
-			PatientRegistration.status == RegistrationStatus.completed,
-			PatientRegistration.user_id.isnot(None),
-		)
-		.subquery()
-	)
-	patient_filter = or_(
-		User.id.in_(reg_ids),
-		User.doctor_id == current_user.id,
-	)
-
 	# ── target_date 당일 끝(23:59:59 UTC) ───────────────────
 	target_date_end = datetime(
 		target_date.year, target_date.month, target_date.day,
 		23, 59, 59, tzinfo=timezone.utc
+	)
+	target_date_start = datetime(
+		target_date.year, target_date.month, target_date.day,
+		0, 0, 0, tzinfo=timezone.utc
+	)
+
+	# ── target_date 기준 담당 환자 ID 집합 ──────────────────
+	# assignment 기반: started_at <= target_date AND (ended_at IS NULL OR ended_at >= target_date)
+	assign_patient_ids = (
+		db.query(PatientDoctorAssignment.patient_id)
+		.filter(
+			PatientDoctorAssignment.doctor_id == current_user.id,
+			PatientDoctorAssignment.started_at <= target_date_end,
+			or_(
+				PatientDoctorAssignment.ended_at.is_(None),
+				PatientDoctorAssignment.ended_at >= target_date_start,
+			),
+		)
+		.subquery()
+	)
+	patient_filter = or_(
+		User.id.in_(assign_patient_ids),
+		User.doctor_id == current_user.id,  # 레거시 호환
 	)
 
 	# ── 활성 환자 목록 (target_date 당시 기준 — 가입일 필터) ──

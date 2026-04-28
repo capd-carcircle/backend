@@ -44,6 +44,12 @@ def submit_record(
     current_user: User = Depends(get_current_user),
 ):
     _require_patient(current_user)
+    # 담당 의사가 없는 경우 기록 제출 차단
+    if not current_user.doctor_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="담당 의사가 지정되지 않아 기록을 제출할 수 없습니다. 담당 의사 연결 후 이용해주세요.",
+        )
     record = create_daily_record(db, patient_id=current_user.id, data=payload)
     return record
 

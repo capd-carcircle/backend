@@ -1,18 +1,22 @@
 """
 patients.py — 의사용 환자 관리 API
 
-환자 목록: patient_registrations(status=completed)로 주치의-환자 관계 필터링
+담당 관계는 patient_doctor_assignments 테이블 기준.
+- scope=current  : ended_at IS NULL 인 현재 담당 환자
+- scope=past     : ended_at IS NOT NULL 인 과거 담당 환자
+- 기록 접근 범위 : 현재 담당 → 전체 기록 / 과거 담당 → 담당 기간(~ended_at) 내 기록
 """
 from datetime import date, datetime, timezone
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import desc
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import desc, or_
 from sqlalchemy.orm import Session
 
 from app.core.auth import get_current_user
 from app.core.database import get_db
 from app.models.hospital import Hospital
+from app.models.patient_assignment import PatientDoctorAssignment
 from app.models.patient_note import PatientNote
 from app.models.record import DailyRecord, RecordStatus
 from app.models.registration import PatientRegistration, RegistrationStatus
@@ -41,14 +45,17 @@ class PatientRecordsResponse(BaseModel):
     records:      List[PatientRecordRow]
 
 class PatientOverview(BaseModel):
-    id:                   int
-    name:                 str
-    phone_number:         str
-    total_records:        int
-    last_record_date:     Optional[str]
-    last_submitted_at:    Optional[str]
-    latest_risk_level:    Optional[str]
+    id:                     int
+    name:                   str
+    phone_number:           str
+    total_records:          int
+    last_record_date:       Optional[str]
+    last_submitted_at:      Optional[str]
+    latest_risk_level:      Optional[str]
     days_since_last_record: Optional[int]
+    is_current:             bool       # True = 현재 담당
+    assignment_started_at:  Optional[str]
+    assignment_ended_at:    Optional[str]
 
 
 # ── 헬퍼 ──────────────────────────────────────────────────
@@ -61,13 +68,46 @@ def _require_doctor(current_user: User) -> None:
         )
 
 
-# ── 엔드포인트 ────────────────────────────────────────────
+def _get_assignment(
+    db: Session,
+    doctor_id: int,
+    patient_id: int,
+) -> Optional[PatientDoctorAssignment]:
+    """해당 의사-환자 assignment 중 가장 최근 것 반환 (현재·과거 모두)"""
+    return (
+        db.query(PatientDoctorAssignment)
+        .filter(
+            PatientDoctorAssignment.doctor_id == doctor_id,
+            PatientDoctorAssignment.patient_id == patient_id,
+        )
+        .order_by(PatientDoctorAssignment.started_at.desc())
+        .first()
+    )
+
+
+def _get_current_assignment(
+    db: Session,
+    doctor_id: int,
+    patient_id: int,
+) -> Optional[PatientDoctorAssignment]:
+    """현재 담당 assignment (ended_at IS NULL)"""
+    return (
+        db.query(PatientDoctorAssignment)
+        .filter(
+            PatientDoctorAssignment.doctor_id == doctor_id,
+            PatientDoctorAssignment.patient_id == patient_id,
+            PatientDoctorAssignment.ended_at.is_(None),
+        )
+        .first()
+    )
+
+
+# ── 환자 목록 ──────────────────────────────────────────────
 
 @router.get(
     "",
     response_model=List[PatientInfo],
-    summary="나의 환자 목록",
-    description="patient_registrations(completed) 또는 users.doctor_id 기준으로 담당 환자 반환 (시드 데이터 호환).",
+    summary="나의 환자 목록 (현재 담당)",
 )
 def list_patients(
     db: Session = Depends(get_db),
@@ -75,26 +115,22 @@ def list_patients(
 ) -> List[PatientInfo]:
     _require_doctor(current_user)
 
-    # patient_registrations.completed로 연결된 환자 ID
-    reg_ids = (
-        db.query(PatientRegistration.user_id)
+    # assignment 기반 현재 담당 + 레거시(users.doctor_id) 호환
+    assign_patient_ids = (
+        db.query(PatientDoctorAssignment.patient_id)
         .filter(
-            PatientRegistration.doctor_id == current_user.id,
-            PatientRegistration.status == RegistrationStatus.completed,
-            PatientRegistration.user_id.isnot(None),
+            PatientDoctorAssignment.doctor_id == current_user.id,
+            PatientDoctorAssignment.ended_at.is_(None),
         )
         .subquery()
     )
-
-    # OR: users.doctor_id로 직접 연결된 환자 (시드 데이터 등)
-    from sqlalchemy import or_
     patients = (
         db.query(User)
         .filter(
             User.role == UserRole.patient,
             User.is_active == True,
             or_(
-                User.id.in_(reg_ids),
+                User.id.in_(assign_patient_ids),
                 User.doctor_id == current_user.id,
             ),
         )
@@ -107,64 +143,98 @@ def list_patients(
 @router.get(
     "/overview",
     response_model=List[PatientOverview],
-    summary="환자별 요약 정보 (전체 기록 수, 마지막 제출일, 최근 위험도)",
+    summary="환자별 요약 정보",
+    description="scope=current(기본) 현재 담당, scope=past 과거 담당",
 )
 def list_patients_overview(
+    scope: str = Query(default="current", description="current | past"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> List[PatientOverview]:
     _require_doctor(current_user)
 
-    from sqlalchemy import or_, func
-    reg_ids = (
-        db.query(PatientRegistration.user_id)
-        .filter(
-            PatientRegistration.doctor_id == current_user.id,
-            PatientRegistration.status == RegistrationStatus.completed,
-            PatientRegistration.user_id.isnot(None),
-        )
-        .subquery()
-    )
-    patients = (
-        db.query(User)
-        .filter(
-            User.role == UserRole.patient,
-            User.is_active == True,
-            or_(User.id.in_(reg_ids), User.doctor_id == current_user.id),
-        )
-        .order_by(User.name)
-        .all()
-    )
+    is_current = (scope != "past")
 
-    today = datetime.now(timezone.utc).date()
-    result = []
-    for p in patients:
-        records = (
-            db.query(DailyRecord)
-            .filter(DailyRecord.patient_id == p.id)
-            .order_by(desc(DailyRecord.record_date))
+    # assignment 레코드 조회
+    q = db.query(PatientDoctorAssignment).filter(
+        PatientDoctorAssignment.doctor_id == current_user.id,
+    )
+    if is_current:
+        # ended_at IS NULL OR users.doctor_id == current_user.id (레거시)
+        q = q.filter(PatientDoctorAssignment.ended_at.is_(None))
+    else:
+        q = q.filter(PatientDoctorAssignment.ended_at.isnot(None))
+
+    assignments = q.order_by(PatientDoctorAssignment.started_at.desc()).all()
+
+    # 레거시 호환: assignment가 없고 users.doctor_id로 연결된 현재 환자
+    legacy_patients: List[User] = []
+    if is_current:
+        assigned_patient_ids = {a.patient_id for a in assignments}
+        legacy_patients = (
+            db.query(User)
+            .filter(
+                User.role == UserRole.patient,
+                User.is_active == True,
+                User.doctor_id == current_user.id,
+                User.id.notin_(assigned_patient_ids) if assigned_patient_ids else True,
+            )
             .all()
         )
+
+    today = datetime.now(timezone.utc).date()
+    result: List[PatientOverview] = []
+
+    def _make_overview(patient: User, assignment: Optional[PatientDoctorAssignment], curr: bool) -> PatientOverview:
+        # 접근 가능한 기록 범위 결정
+        records_q = db.query(DailyRecord).filter(DailyRecord.patient_id == patient.id)
+        if not curr and assignment and assignment.ended_at:
+            # 과거 담당: 담당 종료일까지의 기록만
+            records_q = records_q.filter(
+                DailyRecord.record_date <= assignment.ended_at.date()
+            )
+        records = records_q.order_by(desc(DailyRecord.record_date)).all()
+
         submitted = [r for r in records if r.status.value in ("submitted", "reviewed")]
         last_rec  = records[0] if records else None
         last_sub  = submitted[0] if submitted else None
 
-        days_since = None
-        if last_rec:
-            days_since = (today - last_rec.record_date).days
+        days_since = (today - last_rec.record_date).days if last_rec else None
 
-        result.append(PatientOverview(
-            id                    = p.id,
-            name                  = p.name,
-            phone_number          = p.phone_number,
+        return PatientOverview(
+            id                    = patient.id,
+            name                  = patient.name,
+            phone_number          = patient.phone_number,
             total_records         = len(records),
             last_record_date      = last_rec.record_date.isoformat() if last_rec else None,
             last_submitted_at     = last_sub.submitted_at.isoformat() if last_sub and last_sub.submitted_at else None,
             latest_risk_level     = last_sub.risk_level.value if last_sub and last_sub.risk_level else None,
             days_since_last_record= days_since,
-        ))
+            is_current            = curr,
+            assignment_started_at = assignment.started_at.isoformat() if assignment else None,
+            assignment_ended_at   = assignment.ended_at.isoformat() if assignment and assignment.ended_at else None,
+        )
+
+    # assignment 기반 환자 처리 (환자당 가장 최근 assignment 하나씩)
+    seen_patients: set[int] = set()
+    for asgn in assignments:
+        if asgn.patient_id in seen_patients:
+            continue
+        seen_patients.add(asgn.patient_id)
+        patient = db.query(User).filter_by(id=asgn.patient_id).first()
+        if not patient:
+            continue
+        result.append(_make_overview(patient, asgn, is_current))
+
+    # 레거시 환자 추가
+    for patient in legacy_patients:
+        result.append(_make_overview(patient, None, True))
+
+    result.sort(key=lambda r: r.name)
     return result
 
+
+# ── 환자 기록 목록 (의사용) ─────────────────────────────────
 
 @router.get(
     "/{patient_id}/records",
@@ -178,34 +248,28 @@ def list_patient_records(
 ) -> PatientRecordsResponse:
     _require_doctor(current_user)
 
-    # 담당 환자인지 확인 — registrations 또는 doctor_id 둘 중 하나라도 있으면 허용
-    from sqlalchemy import or_
-    patient_check = db.query(User).filter(
-        User.id == patient_id,
-        User.role == UserRole.patient,
-        User.is_active == True,
-        or_(
-            User.doctor_id == current_user.id,
-            User.id.in_(
-                db.query(PatientRegistration.user_id).filter(
-                    PatientRegistration.doctor_id == current_user.id,
-                    PatientRegistration.status == RegistrationStatus.completed,
-                    PatientRegistration.user_id.isnot(None),
-                )
-            ),
-        ),
-    ).first()
-    if not patient_check:
-        raise HTTPException(status_code=404, detail="담당 환자를 찾을 수 없습니다.")
+    # 접근 권한 확인 — 현재 또는 과거 담당이면 허용
+    assignment = _get_assignment(db, current_user.id, patient_id)
+    # 레거시 호환
+    patient = db.query(User).filter(User.id == patient_id, User.role == UserRole.patient).first()
+    if not patient:
+        raise HTTPException(status_code=404, detail="환자를 찾을 수 없습니다.")
 
-    patient = patient_check
-
-    records = (
-        db.query(DailyRecord)
-        .filter(DailyRecord.patient_id == patient_id)
-        .order_by(desc(DailyRecord.record_date))
-        .all()
+    has_access = (
+        assignment is not None
+        or patient.doctor_id == current_user.id
     )
+    if not has_access:
+        raise HTTPException(status_code=403, detail="접근 권한이 없습니다.")
+
+    # 기록 범위 제한 (과거 담당이면 담당 기간 내 기록만)
+    records_q = db.query(DailyRecord).filter(DailyRecord.patient_id == patient_id)
+    is_current = assignment is None or assignment.ended_at is None
+    if not is_current and assignment and assignment.ended_at:
+        records_q = records_q.filter(
+            DailyRecord.record_date <= assignment.ended_at.date()
+        )
+    records = records_q.order_by(desc(DailyRecord.record_date)).all()
 
     rows = [
         PatientRecordRow(
@@ -233,8 +297,9 @@ class PatientDetailProfile(BaseModel):
     birth_date:   Optional[str]
     hospital_name: Optional[str]
     doctor_name:  Optional[str]
-    self_memo:    Optional[str]   # 환자 자기 메모 (읽기 전용)
-    joined_at:    Optional[str]   # 가입일
+    self_memo:    Optional[str]
+    joined_at:    Optional[str]
+    is_current_patient: bool    # 현재 담당 여부
 
 
 @router.get(
@@ -249,44 +314,131 @@ def get_patient_profile(
 ) -> PatientDetailProfile:
     _require_doctor(current_user)
 
-    from sqlalchemy import or_
-    patient = db.query(User).filter(
-        User.id == patient_id,
-        User.role == UserRole.patient,
-        User.is_active == True,
-        or_(
-            User.doctor_id == current_user.id,
-            User.id.in_(
-                db.query(PatientRegistration.user_id).filter(
-                    PatientRegistration.doctor_id == current_user.id,
-                    PatientRegistration.status == RegistrationStatus.completed,
-                    PatientRegistration.user_id.isnot(None),
-                )
-            ),
-        ),
-    ).first()
+    patient = db.query(User).filter(User.id == patient_id, User.role == UserRole.patient).first()
     if not patient:
-        raise HTTPException(status_code=404, detail="담당 환자를 찾을 수 없습니다.")
+        raise HTTPException(status_code=404, detail="환자를 찾을 수 없습니다.")
+
+    assignment = _get_assignment(db, current_user.id, patient_id)
+    has_access = assignment is not None or patient.doctor_id == current_user.id
+    if not has_access:
+        raise HTTPException(status_code=403, detail="접근 권한이 없습니다.")
+
+    is_current = (
+        (assignment is not None and assignment.ended_at is None)
+        or patient.doctor_id == current_user.id
+    )
 
     hospital = db.query(Hospital).filter_by(id=patient.hospital_id).first() if patient.hospital_id else None
     doctor   = db.query(User).filter_by(id=patient.doctor_id).first() if patient.doctor_id else None
 
     return PatientDetailProfile(
-        id           = patient.id,
-        name         = patient.name,
-        phone_number = patient.phone_number,
-        birth_date   = patient.birth_date,
-        hospital_name= hospital.name if hospital else None,
-        doctor_name  = doctor.name if doctor else None,
-        self_memo    = patient.self_memo,
-        joined_at    = patient.created_at.isoformat() if patient.created_at else None,
+        id                  = patient.id,
+        name                = patient.name,
+        phone_number        = patient.phone_number,
+        birth_date          = patient.birth_date,
+        hospital_name       = hospital.name if hospital else None,
+        doctor_name         = doctor.name if doctor else None,
+        self_memo           = patient.self_memo,
+        joined_at           = patient.created_at.isoformat() if patient.created_at else None,
+        is_current_patient  = is_current,
     )
 
 
-# ── 의사 메모 (단일 메모, 의사 전용) ──────────────────────────
+# ── 담당 해제 ──────────────────────────────────────────────
+
+@router.post(
+    "/{patient_id}/discharge",
+    summary="담당 환자 해제 (의사용)",
+)
+def discharge_patient(
+    patient_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    _require_doctor(current_user)
+
+    patient = db.query(User).filter(User.id == patient_id, User.role == UserRole.patient).first()
+    if not patient:
+        raise HTTPException(status_code=404, detail="환자를 찾을 수 없습니다.")
+
+    assignment = _get_current_assignment(db, current_user.id, patient_id)
+
+    # 레거시: assignment가 없고 users.doctor_id로 연결된 경우 → assignment 신규 생성 후 종료
+    if not assignment and patient.doctor_id == current_user.id:
+        assignment = PatientDoctorAssignment(
+            patient_id=patient_id,
+            doctor_id=current_user.id,
+            started_at=patient.created_at or datetime.now(timezone.utc),
+        )
+        db.add(assignment)
+        db.flush()
+
+    if not assignment:
+        raise HTTPException(status_code=404, detail="현재 담당 관계가 없습니다.")
+
+    now = datetime.now(timezone.utc)
+    assignment.ended_at = now
+
+    # users.doctor_id도 NULL로
+    if patient.doctor_id == current_user.id:
+        patient.doctor_id = None
+
+    db.commit()
+    return {"message": f"{patient.name} 환자의 담당이 해제되었습니다."}
+
+
+# ── 담당 연결 (의사가 직접 연결) ──────────────────────────────
+
+class AssignPatientRequest(BaseModel):
+    patient_id: int
+
+
+@router.post(
+    "/assign",
+    summary="환자 담당 연결 (의사가 직접)",
+    status_code=status.HTTP_201_CREATED,
+)
+def assign_patient(
+    payload: AssignPatientRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    _require_doctor(current_user)
+
+    patient = db.query(User).filter(User.id == payload.patient_id, User.role == UserRole.patient).first()
+    if not patient:
+        raise HTTPException(status_code=404, detail="환자를 찾을 수 없습니다.")
+
+    # 이미 현재 담당 의사가 있는지 확인
+    existing = (
+        db.query(PatientDoctorAssignment)
+        .filter(
+            PatientDoctorAssignment.patient_id == payload.patient_id,
+            PatientDoctorAssignment.ended_at.is_(None),
+        )
+        .first()
+    )
+    if existing:
+        raise HTTPException(status_code=409, detail="이미 담당 의사가 있습니다. 먼저 기존 담당을 해제하세요.")
+
+    assignment = PatientDoctorAssignment(
+        patient_id=payload.patient_id,
+        doctor_id=current_user.id,
+        started_at=datetime.now(timezone.utc),
+    )
+    db.add(assignment)
+
+    # users.doctor_id 동기화
+    patient.doctor_id = current_user.id
+
+    db.commit()
+    return {"message": f"{patient.name} 환자의 담당 연결이 완료되었습니다."}
+
+
+# ── 의사 메모 ──────────────────────────────────────────────
 
 class PatientNoteResponse(BaseModel):
-    content: Optional[str]
+    content:    Optional[str]
     updated_at: Optional[str]
 
 
@@ -305,15 +457,10 @@ def get_patient_note(
     current_user: User = Depends(get_current_user),
 ) -> PatientNoteResponse:
     _require_doctor(current_user)
-    note = db.query(PatientNote).filter_by(
-        doctor_id=current_user.id, patient_id=patient_id
-    ).first()
+    note = db.query(PatientNote).filter_by(doctor_id=current_user.id, patient_id=patient_id).first()
     if not note:
         return PatientNoteResponse(content=None, updated_at=None)
-    return PatientNoteResponse(
-        content=note.content,
-        updated_at=note.updated_at.isoformat(),
-    )
+    return PatientNoteResponse(content=note.content, updated_at=note.updated_at.isoformat())
 
 
 @router.put(
@@ -329,23 +476,13 @@ def upsert_patient_note(
 ) -> PatientNoteResponse:
     _require_doctor(current_user)
 
-    note = db.query(PatientNote).filter_by(
-        doctor_id=current_user.id, patient_id=patient_id
-    ).first()
-
+    note = db.query(PatientNote).filter_by(doctor_id=current_user.id, patient_id=patient_id).first()
     if note:
         note.content = payload.content
     else:
-        note = PatientNote(
-            doctor_id=current_user.id,
-            patient_id=patient_id,
-            content=payload.content,
-        )
+        note = PatientNote(doctor_id=current_user.id, patient_id=patient_id, content=payload.content)
         db.add(note)
 
     db.commit()
     db.refresh(note)
-    return PatientNoteResponse(
-        content=note.content,
-        updated_at=note.updated_at.isoformat(),
-    )
+    return PatientNoteResponse(content=note.content, updated_at=note.updated_at.isoformat())
