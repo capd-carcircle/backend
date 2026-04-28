@@ -281,9 +281,11 @@ def list_ai_questions(
     return [
         {
             "id":            q.id,
-            "patient_id":    q.patient_id,
-            "patient_name":  patient.name,
-            "record_id":     record.id,
+            "patient_id":          q.patient_id,
+            "patient_name":        patient.name,
+            "patient_birth_date":  patient.birth_date,
+            "patient_gender":      patient.gender,
+            "record_id":           record.id,
             "record_date":   record.record_date.isoformat(),
             "question_text": q.question_text,
             "question_type": q.question_type.value,
