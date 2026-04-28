@@ -363,7 +363,7 @@ def _ai_question_background(
                 question_text=q_data["question_text"],
                 reason=q_data.get("reason"),
                 question_type=q_type,
-                options=q_data.get("options"),  # 이미 JSON 문자열로 전달됨
+                options=json.dumps(q_data["options"], ensure_ascii=False) if q_data.get("options") is not None else None,
             ))
             added += 1
 
