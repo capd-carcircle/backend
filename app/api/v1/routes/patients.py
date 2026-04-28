@@ -12,6 +12,8 @@ from sqlalchemy.orm import Session
 
 from app.core.auth import get_current_user
 from app.core.database import get_db
+from app.models.hospital import Hospital
+from app.models.patient_note import PatientNote
 from app.models.record import DailyRecord, RecordStatus
 from app.models.registration import PatientRegistration, RegistrationStatus
 from app.models.user import User, UserRole
@@ -219,4 +221,131 @@ def list_patient_records(
         patient_id   = patient.id,
         patient_name = patient.name,
         records      = rows,
+    )
+
+
+# ── 환자 상세 프로필 (의사용) ──────────────────────────────────
+
+class PatientDetailProfile(BaseModel):
+    id:           int
+    name:         str
+    phone_number: str
+    birth_date:   Optional[str]
+    hospital_name: Optional[str]
+    doctor_name:  Optional[str]
+    self_memo:    Optional[str]   # 환자 자기 메모 (읽기 전용)
+    joined_at:    Optional[str]   # 가입일
+
+
+@router.get(
+    "/{patient_id}/profile",
+    response_model=PatientDetailProfile,
+    summary="환자 상세 프로필 (의사용)",
+)
+def get_patient_profile(
+    patient_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> PatientDetailProfile:
+    _require_doctor(current_user)
+
+    from sqlalchemy import or_
+    patient = db.query(User).filter(
+        User.id == patient_id,
+        User.role == UserRole.patient,
+        User.is_active == True,
+        or_(
+            User.doctor_id == current_user.id,
+            User.id.in_(
+                db.query(PatientRegistration.user_id).filter(
+                    PatientRegistration.doctor_id == current_user.id,
+                    PatientRegistration.status == RegistrationStatus.completed,
+                    PatientRegistration.user_id.isnot(None),
+                )
+            ),
+        ),
+    ).first()
+    if not patient:
+        raise HTTPException(status_code=404, detail="담당 환자를 찾을 수 없습니다.")
+
+    hospital = db.query(Hospital).filter_by(id=patient.hospital_id).first() if patient.hospital_id else None
+    doctor   = db.query(User).filter_by(id=patient.doctor_id).first() if patient.doctor_id else None
+
+    return PatientDetailProfile(
+        id           = patient.id,
+        name         = patient.name,
+        phone_number = patient.phone_number,
+        birth_date   = patient.birth_date,
+        hospital_name= hospital.name if hospital else None,
+        doctor_name  = doctor.name if doctor else None,
+        self_memo    = patient.self_memo,
+        joined_at    = patient.created_at.isoformat() if patient.created_at else None,
+    )
+
+
+# ── 의사 메모 (단일 메모, 의사 전용) ──────────────────────────
+
+class PatientNoteResponse(BaseModel):
+    content: Optional[str]
+    updated_at: Optional[str]
+
+
+class PatientNoteUpsert(BaseModel):
+    content: str
+
+
+@router.get(
+    "/{patient_id}/note",
+    response_model=PatientNoteResponse,
+    summary="의사 메모 조회",
+)
+def get_patient_note(
+    patient_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> PatientNoteResponse:
+    _require_doctor(current_user)
+    note = db.query(PatientNote).filter_by(
+        doctor_id=current_user.id, patient_id=patient_id
+    ).first()
+    if not note:
+        return PatientNoteResponse(content=None, updated_at=None)
+    return PatientNoteResponse(
+        content=note.content,
+        updated_at=note.updated_at.isoformat(),
+    )
+
+
+@router.put(
+    "/{patient_id}/note",
+    response_model=PatientNoteResponse,
+    summary="의사 메모 저장 (upsert)",
+)
+def upsert_patient_note(
+    patient_id: int,
+    payload: PatientNoteUpsert,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> PatientNoteResponse:
+    _require_doctor(current_user)
+
+    note = db.query(PatientNote).filter_by(
+        doctor_id=current_user.id, patient_id=patient_id
+    ).first()
+
+    if note:
+        note.content = payload.content
+    else:
+        note = PatientNote(
+            doctor_id=current_user.id,
+            patient_id=patient_id,
+            content=payload.content,
+        )
+        db.add(note)
+
+    db.commit()
+    db.refresh(note)
+    return PatientNoteResponse(
+        content=note.content,
+        updated_at=note.updated_at.isoformat(),
     )

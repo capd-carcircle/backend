@@ -112,10 +112,10 @@ def doctor_complete(payload: DoctorRegisterStep2, db: Session = Depends(get_db))
     db.add(user)
     db.flush()  # user.id 확보
 
-    # DoctorProfile 생성
+    # DoctorProfile 생성 (birth_date는 users에 이미 저장됨 — profile에도 기록)
     profile = DoctorProfile(
         user_id=user.id,
-        birth_date=token_data["birth_date"],
+        birth_date=token_data["birth_date"],  # users.birth_date와 동일값 (스키마 호환 유지)
         license_number=token_data["license_number"],
         hospital_id=token_data["hospital_id"],
     )
@@ -239,7 +239,8 @@ def patient_complete(payload: PatientRegisterComplete, db: Session = Depends(get
         name=reg.name,
         birth_date=reg.birth_date,
         role=UserRole.patient,
-        doctor_id=reg.doctor_id,  # 담당 의사 연결
+        doctor_id=reg.doctor_id,       # 담당 의사 연결
+        hospital_id=reg.hospital_id,   # 소속 병원 연결
     )
     db.add(user)
     db.flush()

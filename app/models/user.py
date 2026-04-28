@@ -1,7 +1,7 @@
 import enum
 from datetime import datetime, timezone
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Enum, ForeignKey, String
+from sqlalchemy import BigInteger, Boolean, DateTime, Enum, ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -28,6 +28,12 @@ class User(Base):
     doctor_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    # 환자 전용: 소속 병원 (가입 승인 시 patient_registrations에서 복사)
+    hospital_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("hospitals.id", ondelete="SET NULL"), nullable=True
+    )
+    # 환자 전용: 자기 특이사항 메모 (AI 질문 생성에 활용)
+    self_memo: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
