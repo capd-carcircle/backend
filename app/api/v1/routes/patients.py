@@ -304,6 +304,8 @@ class PatientDetailProfile(BaseModel):
     self_memo:    Optional[str]
     joined_at:    Optional[str]
     is_current_patient: bool    # 현재 담당 여부
+    gender:       Optional[str] = None
+    address:      Optional[str] = None
 
 
 @router.get(
@@ -345,6 +347,8 @@ def get_patient_profile(
         self_memo           = patient.self_memo,
         joined_at           = patient.created_at.isoformat() if patient.created_at else None,
         is_current_patient  = is_current,
+        gender              = patient.gender,
+        address             = patient.address,
     )
 
 
