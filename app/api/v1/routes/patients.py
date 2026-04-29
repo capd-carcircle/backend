@@ -32,6 +32,8 @@ class PatientInfo(BaseModel):
     id:           int
     name:         str
     phone_number: str
+    birth_date:   Optional[str] = None
+    gender:       Optional[str] = None
 
 class PatientRecordRow(BaseModel):
     record_id:    int
@@ -139,7 +141,7 @@ def list_patients(
         .order_by(User.name)
         .all()
     )
-    return [PatientInfo(id=p.id, name=p.name, phone_number=p.phone_number) for p in patients]
+    return [PatientInfo(id=p.id, name=p.name, phone_number=p.phone_number, birth_date=p.birth_date, gender=p.gender) for p in patients]
 
 
 @router.get(
