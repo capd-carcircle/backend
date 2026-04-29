@@ -12,6 +12,7 @@ from app.crud.daily_record import (
     get_record_by_id,
     update_daily_record,
 )
+from app.models.patient_note import PatientNote
 from app.models.question import AIQuestion, AIQuestionStatus, CommonQuestion
 from app.models.record import DailyRecord, ExchangeRecord, RecordStatus
 from app.models.survey import SurveyResponse
@@ -177,6 +178,18 @@ def finalize_record(
     # 과거 추세 데이터 계산 (기록 1개부터 활용)
     historical_context = _compute_historical_context(db, current_user.id, record_id)
 
+    # 환자 프로필 조회 (self_memo + 담당 의사 메모)
+    doctor_note_row = (
+        db.query(PatientNote)
+        .filter(PatientNote.patient_id == current_user.id)
+        .order_by(PatientNote.updated_at.desc())
+        .first()
+    )
+    patient_profile = {
+        "self_memo":   current_user.self_memo if current_user.self_memo else None,
+        "doctor_note": doctor_note_row.content if doctor_note_row and doctor_note_row.content else None,
+    }
+
     _ai_in_progress.add(record_id)
     background_tasks.add_task(
         _ai_question_background,
@@ -185,6 +198,7 @@ def finalize_record(
         record_data=record_data,
         rejected_keys=rejected_keys,
         historical_context=historical_context,
+        patient_profile=patient_profile,
     )
 
     db.refresh(record)

@@ -18,6 +18,7 @@ from sqlalchemy import desc
 from app.core.auth import get_current_user
 from app.core.database import get_db, SessionLocal
 from app.models.question import AIQuestion, AIQuestionStatus, AIQuestionType, CommonQuestion, QuestionPatientAssignment
+from app.models.patient_note import PatientNote
 from app.models.record import DailyRecord, RiskLevel
 from app.models.survey import SurveyResponse, SurveyChoice, RejectedQPattern
 from app.models.user import User, UserRole
@@ -316,11 +317,12 @@ def _ai_question_background(
     record_data: dict,
     rejected_keys: list,
     historical_context: dict = None,
+    patient_profile: dict = None,
 ):
     """
     백그라운드에서 ai/ 서버의 /ai-questions/generate 호출
     Gemini가 KDIGO 기반으로 3~5개 질문 전담 생성 → DB 저장
-    historical_context로 과거 추세 반영
+    historical_context로 과거 추세 반영, patient_profile로 개인화
     """
     db = SessionLocal()
     try:
@@ -340,6 +342,7 @@ def _ai_question_background(
                     "record_data":        record_data,
                     "rejected_keys":      rejected_keys,
                     "historical_context": historical_context or {},
+                    "patient_profile":    patient_profile or {},
                 },
             )
             resp.raise_for_status()
@@ -574,6 +577,19 @@ async def complete_survey(
     # 30일 집계 컨텍스트 계산
     historical_context = _compute_historical_context(db, current_user.id, record_id)
 
+    # 환자 프로필 조회 (self_memo + 담당 의사 메모)
+    patient_user = db.query(User).filter(User.id == current_user.id).first()
+    doctor_note_row = (
+        db.query(PatientNote)
+        .filter(PatientNote.patient_id == current_user.id)
+        .order_by(PatientNote.updated_at.desc())
+        .first()
+    )
+    patient_profile = {
+        "self_memo":   patient_user.self_memo if patient_user and patient_user.self_memo else None,
+        "doctor_note": doctor_note_row.content if doctor_note_row and doctor_note_row.content else None,
+    }
+
     # AI 서버에 요약 요청
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
@@ -584,6 +600,7 @@ async def complete_survey(
                     "common_qa":            common_qa,
                     "ai_survey_responses":  ai_survey_responses,
                     "historical_context":   historical_context,
+                    "patient_profile":      patient_profile,
                 },
             )
             resp.raise_for_status()
