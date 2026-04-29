@@ -270,7 +270,6 @@ def list_ai_questions(
         .join(User, AIQuestion.patient_id == User.id)
         .filter(
             AIQuestion.patient_id.in_(patient_ids),
-            AIQuestion.status != AIQuestionStatus.rejected_global,
         )
     )
     if patient_id:
@@ -335,3 +334,36 @@ def reject_ai_question(
 
     db.commit()
     return {"success": True, "scope": body.scope, "question_id": question_id}
+
+
+@router.post(
+    "/ai/{question_id}/restore",
+    summary="AI 질문 복구 (거절 → 검토 대기, 의사 전용)",
+)
+def restore_ai_question(
+    question_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    _require_doctor(current_user)
+
+    q = db.query(AIQuestion).filter(AIQuestion.id == question_id).first()
+    if not q:
+        raise HTTPException(status_code=404, detail="질문을 찾을 수 없습니다.")
+    if q.status not in (AIQuestionStatus.rejected_for_patient, AIQuestionStatus.rejected_global):
+        raise HTTPException(status_code=400, detail="거절된 질문만 복구할 수 있습니다.")
+
+    if q.status == AIQuestionStatus.rejected_global:
+        db.query(RejectedQPattern).filter(
+            RejectedQPattern.pattern == q.question_text,
+            RejectedQPattern.patient_id.is_(None),
+        ).delete(synchronize_session=False)
+    else:
+        db.query(RejectedQPattern).filter(
+            RejectedQPattern.pattern == q.question_text,
+            RejectedQPattern.patient_id == q.patient_id,
+        ).delete(synchronize_session=False)
+
+    q.status = AIQuestionStatus.pending
+    db.commit()
+    return {"success": True, "question_id": question_id}

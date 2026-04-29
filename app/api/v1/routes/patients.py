@@ -165,7 +165,19 @@ def list_patients_overview(
         # ended_at IS NULL OR users.doctor_id == current_user.id (레거시)
         q = q.filter(PatientDoctorAssignment.ended_at.is_(None))
     else:
-        q = q.filter(PatientDoctorAssignment.ended_at.isnot(None))
+        # 현재 이 의사에게 다시 담당 중인 환자는 과거 목록에서 제외
+        current_patient_ids_sq = (
+            db.query(PatientDoctorAssignment.patient_id)
+            .filter(
+                PatientDoctorAssignment.doctor_id == current_user.id,
+                PatientDoctorAssignment.ended_at.is_(None),
+            )
+            .subquery()
+        )
+        q = q.filter(
+            PatientDoctorAssignment.ended_at.isnot(None),
+            PatientDoctorAssignment.patient_id.notin_(current_patient_ids_sq),
+        )
 
     assignments = q.order_by(PatientDoctorAssignment.started_at.desc()).all()
 
