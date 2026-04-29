@@ -1,6 +1,8 @@
 from datetime import datetime, timezone
+from typing import List
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.core.auth import get_current_user
@@ -391,6 +393,31 @@ def revert_record(
     db.refresh(record)
 
     return {"success": True, "message": "검토 중으로 되돌렸습니다.", "record_id": record_id}
+
+
+# ── 의사: 기록 일괄 승인 ────────────────────────────────────
+class BulkApproveRequest(BaseModel):
+    record_ids: List[int]
+
+
+@router.post("/bulk-approve", summary="기록 일괄 승인 (의사용)")
+def bulk_approve_records(
+    body: BulkApproveRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    _require_doctor(current_user)
+    now = datetime.now(timezone.utc)
+    approved = []
+    for rid in body.record_ids:
+        r = db.query(DailyRecord).filter(DailyRecord.id == rid).first()
+        if r and r.status != RecordStatus.reviewed:
+            r.status      = RecordStatus.reviewed
+            r.approved_by = current_user.id
+            r.updated_at  = now
+            approved.append(rid)
+    db.commit()
+    return {"approved": approved, "total": len(approved)}
 
 
 # ── EMR SOAP 파서 (Gemini 결과 → dict) ────────────────────

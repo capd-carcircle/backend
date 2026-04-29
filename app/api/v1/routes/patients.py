@@ -6,8 +6,8 @@ patients.py — 의사용 환자 관리 API
 - scope=past     : ended_at IS NOT NULL 인 과거 담당 환자
 - 기록 접근 범위 : 현재 담당 → 전체 기록 / 과거 담당 → 담당 기간(~ended_at) 내 기록
 """
-from datetime import date, datetime, timezone
-from typing import List, Optional
+from datetime import date, datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import desc, or_
@@ -508,3 +508,113 @@ def upsert_patient_note(
     db.commit()
     db.refresh(note)
     return PatientNoteResponse(content=note.content, updated_at=note.updated_at.isoformat())
+
+
+# ── 환자 수치 트렌드 (의사용) ──────────────────────────────────
+
+@router.get(
+    "/{patient_id}/trend",
+    summary="환자 수치 최근 추이 (의사용)",
+)
+def get_patient_trend(
+    patient_id: int,
+    days: int = Query(default=14, ge=3, le=90),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> List[Dict[str, Any]]:
+    _require_doctor(current_user)
+
+    patient = db.query(User).filter(User.id == patient_id, User.role == UserRole.patient).first()
+    if not patient:
+        raise HTTPException(status_code=404, detail="환자를 찾을 수 없습니다.")
+
+    assignment = _get_assignment(db, current_user.id, patient_id)
+    if not assignment and patient.doctor_id != current_user.id:
+        raise HTTPException(status_code=403, detail="접근 권한이 없습니다.")
+
+    cutoff = datetime.now(timezone.utc).date() - timedelta(days=days)
+    records = (
+        db.query(DailyRecord)
+        .filter(
+            DailyRecord.patient_id == patient_id,
+            DailyRecord.record_date >= cutoff,
+            DailyRecord.status.in_(["submitted", "reviewed"]),
+        )
+        .order_by(DailyRecord.record_date)
+        .all()
+    )
+
+    return [
+        {
+            "record_date":            r.record_date.isoformat(),
+            "weight":                 float(r.weight) if r.weight is not None else None,
+            "total_ultrafiltration":  float(r.total_ultrafiltration) if r.total_ultrafiltration is not None else None,
+            "blood_pressure":         r.blood_pressure,
+            "risk_level":             r.risk_level.value if r.risk_level else None,
+        }
+        for r in records
+    ]
+
+
+# ── 기록 PDF 내보내기 (의사용) ─────────────────────────────────
+
+@router.get(
+    "/{patient_id}/records-export",
+    summary="기록 내보내기 HTML (의사용)",
+)
+def export_patient_records(
+    patient_id: int,
+    start_date: Optional[str] = Query(default=None, description="YYYY-MM-DD"),
+    end_date:   Optional[str] = Query(default=None, description="YYYY-MM-DD"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> Dict[str, Any]:
+    _require_doctor(current_user)
+
+    patient = db.query(User).filter(User.id == patient_id, User.role == UserRole.patient).first()
+    if not patient:
+        raise HTTPException(status_code=404, detail="환자를 찾을 수 없습니다.")
+
+    assignment = _get_assignment(db, current_user.id, patient_id)
+    if not assignment and patient.doctor_id != current_user.id:
+        raise HTTPException(status_code=403, detail="접근 권한이 없습니다.")
+
+    hospital = db.query(Hospital).filter_by(id=patient.hospital_id).first() if patient.hospital_id else None
+
+    records_q = db.query(DailyRecord).filter(
+        DailyRecord.patient_id == patient_id,
+        DailyRecord.status.in_(["submitted", "reviewed"]),
+    )
+    if start_date:
+        records_q = records_q.filter(DailyRecord.record_date >= date.fromisoformat(start_date))
+    if end_date:
+        records_q = records_q.filter(DailyRecord.record_date <= date.fromisoformat(end_date))
+    records = records_q.order_by(DailyRecord.record_date).all()
+
+    risk_label = {"urgent": "긴급", "caution": "주의", "normal": "정상"}
+
+    return {
+        "patient": {
+            "name":         patient.name,
+            "birth_date":   patient.birth_date,
+            "gender":       "남" if patient.gender == "m" else "여" if patient.gender == "f" else None,
+            "phone_number": patient.phone_number,
+            "hospital":     hospital.name if hospital else None,
+        },
+        "period": {"start": start_date, "end": end_date},
+        "records": [
+            {
+                "record_date":            r.record_date.isoformat(),
+                "weight":                 float(r.weight) if r.weight is not None else None,
+                "blood_pressure":         r.blood_pressure,
+                "total_ultrafiltration":  float(r.total_ultrafiltration) if r.total_ultrafiltration is not None else None,
+                "fasting_blood_glucose":  float(r.fasting_blood_glucose) if r.fasting_blood_glucose is not None else None,
+                "turbid_peritoneal":      r.turbid_peritoneal,
+                "risk_level":             risk_label.get(r.risk_level.value, "") if r.risk_level else "",
+                "memo":                   r.memo or "",
+            }
+            for r in records
+        ],
+        "doctor_name": current_user.name,
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+    }
