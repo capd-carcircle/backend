@@ -34,6 +34,9 @@ AI_SERVER_URL = "http://ai:8001"   # docker-compose 서비스명
 # 백그라운드 AI 질문 생성 중인 record_id 추적 (중복 실행 방지)
 _ai_in_progress: set = set()
 
+# 백그라운드 AI 요약 생성 중인 record_id 추적 (중복 제출 방지)
+_summary_in_progress: set = set()
+
 MAX_AI_QUESTIONS = 5   # Gemini가 생성하는 AI 질문 최대 개수
 
 
@@ -223,9 +226,10 @@ def get_my_survey_responses(
             "answered":      r is not None,
         })
 
-    total_count    = len(common_out) + len(ai_out)
-    answered_count = sum(1 for q in common_out + ai_out if q["answered"])
-    ai_pending     = record_id in _ai_in_progress
+    total_count       = len(common_out) + len(ai_out)
+    answered_count    = sum(1 for q in common_out + ai_out if q["answered"])
+    ai_pending        = record_id in _ai_in_progress
+    survey_completed  = record.risk_level is not None or record_id in _summary_in_progress
 
     return {
         "common_questions": common_out,
@@ -233,6 +237,7 @@ def get_my_survey_responses(
         "total_count":      total_count,
         "answered_count":   answered_count,
         "ai_pending":       ai_pending,
+        "survey_completed": survey_completed,
     }
 
 
@@ -493,19 +498,21 @@ def _compute_historical_context(db: Session, patient_id: int, current_record_id:
     }
 
 
-# ── POST 설문 완료 + AI 요약 트리거 ──────────────────────
+# ── POST 설문 완료 + AI 요약 트리거 (백그라운드) ──────────
 @router.post(
     "/complete/{record_id}",
-    summary="설문 완료 — AI 종합 요약 생성 트리거",
+    summary="설문 완료 — AI 종합 요약 백그라운드 생성 트리거",
 )
-async def complete_survey(
+def complete_survey(
     record_id: int,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """
     환자가 모든 설문 응답 완료 후 호출.
-    기록 수치 + 공통질문 응답 + AI 설문 응답을 AI 서버에 전달 → 위험도/요약/EMR 생성 → DB 저장.
+    AI 요약은 백그라운드에서 생성되며, 호출 즉시 완료 응답 반환.
+    중복 호출 방지: 이미 요약이 있거나 생성 중이면 409 반환.
     """
     if current_user.role != UserRole.patient:
         raise HTTPException(status_code=403, detail="환자만 접근할 수 있습니다.")
@@ -516,7 +523,13 @@ async def complete_survey(
     if record.patient_id != current_user.id:
         raise HTTPException(status_code=403, detail="접근 권한이 없습니다.")
 
-    # 기록 수치 dict
+    # 중복 제출 방지: 이미 요약 생성 완료 또는 진행 중
+    if record.risk_level is not None:
+        raise HTTPException(status_code=409, detail="이미 제출된 설문입니다.")
+    if record_id in _summary_in_progress:
+        raise HTTPException(status_code=409, detail="AI 요약이 이미 생성 중입니다.")
+
+    # 응답 데이터 수집 (백그라운드 함수에 넘길 snapshot)
     record_data = {
         "blood_pressure":        record.blood_pressure,
         "weight":                float(record.weight) if record.weight else None,
@@ -527,15 +540,6 @@ async def complete_survey(
         "memo":                  record.memo,
     }
 
-    # 응답 맵 조회
-    responses = (
-        db.query(SurveyResponse)
-        .filter(SurveyResponse.daily_record_id == record_id)
-        .all()
-    )
-    resp_map = {(r.question_id, r.question_type): r for r in responses}
-
-    # 공통 질문 응답 조립 (이 환자에게 노출된 질문만)
     from sqlalchemy import or_
     _assigned_complete = (
         db.query(QuestionPatientAssignment.question_id)
@@ -554,6 +558,13 @@ async def complete_survey(
         .order_by(CommonQuestion.created_at.asc())
         .all()
     )
+    responses = (
+        db.query(SurveyResponse)
+        .filter(SurveyResponse.daily_record_id == record_id)
+        .all()
+    )
+    resp_map = {(r.question_id, r.question_type): r for r in responses}
+
     common_qa = []
     for q in common_qs:
         r = resp_map.get((q.id, "common"))
@@ -563,7 +574,6 @@ async def complete_survey(
             "text_answer":   r.text_answer if r else None,
         })
 
-    # AI 질문 응답 조립
     ai_qs = (
         db.query(AIQuestion)
         .filter(
@@ -577,7 +587,6 @@ async def complete_survey(
         r = resp_map.get((q.id, "ai"))
         if not r:
             continue
-        # 응답 텍스트 결정: choice(yes_no) 또는 text_answer(나머지 타입)
         answer = r.text_answer or (r.choice.value if r.choice else None) or "미응답"
         ai_survey_responses.append({
             "question_text": q.question_text,
@@ -585,10 +594,8 @@ async def complete_survey(
             "answer":        answer,
         })
 
-    # 30일 집계 컨텍스트 계산
     historical_context = _compute_historical_context(db, current_user.id, record_id)
 
-    # 환자 프로필 조회 (self_memo + 담당 의사 메모)
     patient_user = db.query(User).filter(User.id == current_user.id).first()
     doctor_note_row = (
         db.query(PatientNote)
@@ -601,35 +608,59 @@ async def complete_survey(
         "doctor_note": doctor_note_row.content if doctor_note_row and doctor_note_row.content else None,
     }
 
-    # AI 서버에 요약 요청
+    # 백그라운드 요약 생성 트리거
+    _summary_in_progress.add(record_id)
+    background_tasks.add_task(
+        _summary_background,
+        record_id=record_id,
+        record_data=record_data,
+        common_qa=common_qa,
+        ai_survey_responses=ai_survey_responses,
+        historical_context=historical_context,
+        patient_profile=patient_profile,
+    )
+
+    logger.info(f"설문 완료 — AI 요약 백그라운드 트리거 (record_id={record_id})")
+    return {"success": True}
+
+
+# ── AI 요약 백그라운드 함수 ───────────────────────────────
+def _summary_background(
+    record_id: int,
+    record_data: dict,
+    common_qa: list,
+    ai_survey_responses: list,
+    historical_context: dict,
+    patient_profile: dict,
+):
+    """Background: generate AI summary/risk/EMR and save to DB."""
+    db = SessionLocal()
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(
+        with httpx.Client(timeout=90.0) as client:
+            resp = client.post(
                 f"{AI_SERVER_URL}/summary",
                 json={
-                    "record_data":          record_data,
-                    "common_qa":            common_qa,
-                    "ai_survey_responses":  ai_survey_responses,
-                    "historical_context":   historical_context,
-                    "patient_profile":      patient_profile,
+                    "record_data":         record_data,
+                    "common_qa":           common_qa,
+                    "ai_survey_responses": ai_survey_responses,
+                    "historical_context":  historical_context,
+                    "patient_profile":     patient_profile,
                 },
             )
             resp.raise_for_status()
             result = resp.json()
+
+        record = db.query(DailyRecord).filter(DailyRecord.id == record_id).first()
+        if record:
+            record.risk_level = RiskLevel(result["risk_level"])
+            record.ai_summary = result["ai_summary"]
+            record.emr_soap   = result["emr_soap"]
+            db.commit()
+            logger.info(f"AI summary saved (record_id={record_id}, risk={result['risk_level']})")
+
     except Exception as e:
-        logger.error(f"AI 서버 요약 요청 실패 (record_id={record_id}): {e}")
-        raise HTTPException(status_code=503, detail="AI 서버에 연결할 수 없습니다. 잠시 후 다시 시도해 주세요.")
-
-    # DB 저장
-    record.risk_level = RiskLevel(result["risk_level"])
-    record.ai_summary = result["ai_summary"]
-    record.emr_soap   = result["emr_soap"]
-    db.commit()
-
-    logger.info(f"설문 완료 요약 저장 (record_id={record_id}, risk={result['risk_level']})")
-
-    return {
-        "success":    True,
-        "risk_level": result["risk_level"],
-        "ai_summary": result["ai_summary"],
-    }
+        logger.error(f"AI summary background failed (record_id={record_id}): {e}")
+        db.rollback()
+    finally:
+        _summary_in_progress.discard(record_id)
+        db.close()
