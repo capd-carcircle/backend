@@ -10,13 +10,14 @@ from datetime import datetime, timedelta, timezone
 import httpx
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.database import SessionLocal
 from app.models.question import AIQuestion, AIQuestionStatus, AIQuestionType
 from app.models.record import DailyRecord, RiskLevel
 
 logger = logging.getLogger(__name__)
 
-AI_SERVER_URL = "http://ai:8001"
+AI_SERVER_URL = settings.AI_SERVICE_URL
 MAX_AI_QUESTIONS = 5
 
 # 백그라운드 AI 질문 생성 중인 record_id 추적 (중복 실행 방지)

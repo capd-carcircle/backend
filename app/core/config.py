@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     GOOGLE_CLOUD_PROJECT: str = ""
     GEMINI_MODEL: str = "gemini-1.5-pro"
 
+    # AI 서버 URL (로컬/Docker: http://ai:8001, GCP: Cloud Run URL)
+    AI_SERVICE_URL: str = "http://ai:8001"
+
     class Config:
         env_file = ".env"
         extra = "allow"

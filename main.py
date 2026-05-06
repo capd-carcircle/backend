@@ -133,7 +133,14 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000", "http://13.55.214.191:5173", "http://13.55.214.191:8000", "http://13.55.214.191"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "http://13.55.214.191:5173",   # EC2 (종료 전까지 유지)
+        "http://13.55.214.191:8000",
+        "http://13.55.214.191",
+        "https://capd-frontend-cdwaxwdxfa-du.a.run.app",  # GCP Cloud Run
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
