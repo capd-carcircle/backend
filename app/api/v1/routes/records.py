@@ -166,10 +166,10 @@ def finalize_record(
     db.refresh(record)
 
     # AI 질문 생성 — Gemini가 전담 (백그라운드)
-    from app.api.v1.routes.surveys import (
-        _ai_question_background,
+    from app.services.ai_background import (
+        ai_question_background,
         _ai_in_progress,
-        _compute_historical_context,
+        compute_historical_context,
     )
     from app.models.survey import RejectedQPattern
 
@@ -199,7 +199,7 @@ def finalize_record(
     ]
 
     # 과거 추세 데이터 계산 (기록 1개부터 활용)
-    historical_context = _compute_historical_context(db, current_user.id, record_id)
+    historical_context = compute_historical_context(db, current_user.id, record_id)
 
     # 환자 프로필 조회 (self_memo + 담당 의사 메모)
     doctor_note_row = (
@@ -215,7 +215,7 @@ def finalize_record(
 
     _ai_in_progress.add(record_id)
     background_tasks.add_task(
-        _ai_question_background,
+        ai_question_background,
         record_id=record_id,
         patient_id=current_user.id,
         record_data=record_data,

@@ -2,11 +2,11 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    # PostgreSQL
-    DATABASE_URL: str = "postgresql://capd_user:capd_pass@db:5432/capd"
+    # PostgreSQL — 반드시 .env에 설정 (기본값 없음)
+    DATABASE_URL: str
 
-    # JWT
-    SECRET_KEY: str = "dev-secret-key-change-in-production"
+    # JWT — SECRET_KEY는 반드시 .env에 설정 (기본값 없음, 하드코딩 금지)
+    SECRET_KEY: str
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
 
