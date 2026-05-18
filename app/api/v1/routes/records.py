@@ -179,8 +179,28 @@ def finalize_record(
     ).delete()
     db.commit()
 
-    # 오늘 기록 dict 구성
+    # 오늘 기록 exchange_records 조회
+    today_exchanges = (
+        db.query(ExchangeRecord)
+        .filter(ExchangeRecord.daily_record_id == record_id)
+        .order_by(ExchangeRecord.session_number)
+        .all()
+    )
+    today_exchange_list = [
+        {
+            "session_number":         ex.session_number,
+            "exchange_time":          ex.exchange_time,
+            "drainage_volume":        float(ex.drainage_volume) if ex.drainage_volume is not None else None,
+            "infusion_concentration": float(ex.infusion_concentration) if ex.infusion_concentration is not None else None,
+            "infusion_weight":        float(ex.infusion_weight) if ex.infusion_weight is not None else None,
+            "ultrafiltration":        float(ex.ultrafiltration) if ex.ultrafiltration is not None else None,
+        }
+        for ex in today_exchanges
+    ]
+
+    # 오늘 기록 dict 구성 (exchange_records 포함)
     record_data = {
+        "date":                  str(record.record_date),
         "weight":                float(record.weight) if record.weight else None,
         "blood_pressure":        record.blood_pressure,
         "total_ultrafiltration": float(record.total_ultrafiltration) if record.total_ultrafiltration else None,
@@ -188,6 +208,7 @@ def finalize_record(
         "fasting_blood_glucose": float(record.fasting_blood_glucose) if record.fasting_blood_glucose else None,
         "urine_count":           record.urine_count,
         "memo":                  record.memo,
+        "exchange_records":      today_exchange_list,
     }
 
     # 거절된 질문 패턴 조회
@@ -198,8 +219,10 @@ def finalize_record(
         ).all()
     ]
 
-    # 과거 추세 데이터 계산 (기록 1개부터 활용)
-    historical_context = compute_historical_context(db, current_user.id, record_id)
+    # 과거 추세 데이터 계산 (exchange_records 포함한 raw 데이터)
+    hist_result = compute_historical_context(db, current_user.id, record_id)
+    historical_context = hist_result["context"]
+    historical_records = hist_result["historical_records"]
 
     # 환자 프로필 조회 (self_memo + 담당 의사 메모)
     doctor_note_row = (
@@ -222,6 +245,7 @@ def finalize_record(
         rejected_keys=rejected_keys,
         historical_context=historical_context,
         patient_profile=patient_profile,
+        historical_records=historical_records,
     )
 
     db.refresh(record)
@@ -532,36 +556,42 @@ def _build_emr(record: DailyRecord, exchanges: list, patient: User) -> dict:
     if record.turbid_peritoneal:
         s_problems.append("혼탁 투석액 관찰")
     memo_str = f" 메모: {record.memo}" if record.memo else ""
-    s = f"환자 CAPD {sess}회 시행.{' ' + ', '.join(s_problems) + '.' if s_problems else ' 복통 없음. 흐린 투석액 없음.'}{memo_str}"
+    s = (
+        f"환자 CAPD {sess}회 시행."
+        + (f" {', '.join(s_problems)}." if s_problems else " 복통 없음. 흐린 투석액 없음.")
+        + memo_str
+    )
 
     # O
-    uf_str = f"{uf:+.0f} g" if uf is not None else "미기록"
-    o = f"체중 {wt}, 혈압 {bp} mmHg, 공복혈당 {bg} / 총 제수량 {uf_str} / 총 배액량 {total_drain:.0f} g"
+    uf_str = f"{uf:+.0f}g" if uf is not None else "N/A"
+    o = (
+        f"체중 {wt}. 혈압 {bp} mmHg. 공복혈당 {bg}. "
+        f"총 제수량 {uf_str}. 총 투석 배액량 {total_drain:.0f}g. "
+        f"소변량 {record.urine_count}회."
+    )
 
     # A
-    a_items = []
-    if uf is not None and uf < 0:
-        a_items.append("제수량 부족 가능성")
+    a_parts = []
+    if record.turbid_peritoneal:
+        a_parts.append("혼탁 투석액 — 복막염 의심")
     try:
-        if record.blood_pressure and int(record.blood_pressure.split("/")[0]) > 140:
-            a_items.append("혈압 상승 주의 필요")
+        systolic = int((record.blood_pressure or "0/0").split("/")[0])
+        if systolic > 160:
+            a_parts.append(f"혈압 {record.blood_pressure} mmHg — 고혈압 2도")
+        elif systolic > 140:
+            a_parts.append(f"혈압 {record.blood_pressure} mmHg — 고혈압 1도")
     except Exception:
         pass
-    if record.turbid_peritoneal:
-        a_items.append("복막염 의심")
-    a = ". ".join(a_items) + "." if a_items else "특이 소견 없음."
+    if record.fasting_blood_glucose and float(record.fasting_blood_glucose) > 180:
+        a_parts.append(f"공복혈당 {float(record.fasting_blood_glucose):.0f} mg/dL — 고혈당")
+    a = ", ".join(a_parts) if a_parts else "특이 소견 없음."
 
     # P
-    p_items = []
-    try:
-        if record.blood_pressure and int(record.blood_pressure.split("/")[0]) > 140:
-            p_items.append("혈압 모니터링 강화")
-    except Exception:
-        pass
-    if uf is not None and uf < 0:
-        p_items.append("수분 섭취 제한 교육 권고")
+    p_parts = []
     if record.turbid_peritoneal:
-        p_items.append("투석액 배양 검사 시행")
-    p = ". ".join(p_items) + "." if p_items else "현 치료 계획 유지."
+        p_parts.append("즉각 복막액 배양 검사 시행")
+    if not p_parts:
+        p_parts.append("현재 처방 유지 및 경과 관찰")
+    p = ". ".join(p_parts) + "."
 
     return {"S": s, "O": o, "A": a, "P": p}

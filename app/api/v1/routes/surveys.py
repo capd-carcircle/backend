@@ -353,8 +353,29 @@ def complete_survey(
     if record_id in _summary_in_progress:
         raise HTTPException(status_code=409, detail="AI 요약이 이미 생성 중입니다.")
 
-    # 응답 데이터 수집 (백그라운드 함수에 넘길 snapshot)
+    # 오늘 기록 exchange_records 조회
+    from app.models.record import ExchangeRecord
+    survey_exchanges = (
+        db.query(ExchangeRecord)
+        .filter(ExchangeRecord.daily_record_id == record_id)
+        .order_by(ExchangeRecord.session_number)
+        .all()
+    )
+    survey_exchange_list = [
+        {
+            "session_number":         ex.session_number,
+            "exchange_time":          ex.exchange_time,
+            "drainage_volume":        float(ex.drainage_volume) if ex.drainage_volume is not None else None,
+            "infusion_concentration": float(ex.infusion_concentration) if ex.infusion_concentration is not None else None,
+            "infusion_weight":        float(ex.infusion_weight) if ex.infusion_weight is not None else None,
+            "ultrafiltration":        float(ex.ultrafiltration) if ex.ultrafiltration is not None else None,
+        }
+        for ex in survey_exchanges
+    ]
+
+    # 응답 데이터 수집 (백그라운드 함수에 넘길 snapshot, exchange_records 포함)
     record_data = {
+        "date":                  str(record.record_date),
         "blood_pressure":        record.blood_pressure,
         "weight":                float(record.weight) if record.weight else None,
         "total_ultrafiltration": float(record.total_ultrafiltration) if record.total_ultrafiltration else None,
@@ -362,6 +383,7 @@ def complete_survey(
         "turbid_peritoneal":     record.turbid_peritoneal,
         "urine_count":           record.urine_count,
         "memo":                  record.memo,
+        "exchange_records":      survey_exchange_list,
     }
 
     from sqlalchemy import or_
@@ -418,7 +440,9 @@ def complete_survey(
             "answer":        answer,
         })
 
-    historical_context = compute_historical_context(db, current_user.id, record_id)
+    hist_result = compute_historical_context(db, current_user.id, record_id)
+    historical_context = hist_result["context"]
+    historical_records = hist_result["historical_records"]
 
     patient_user = db.query(User).filter(User.id == current_user.id).first()
     doctor_note_row = (
@@ -442,6 +466,7 @@ def complete_survey(
         ai_survey_responses=ai_survey_responses,
         historical_context=historical_context,
         patient_profile=patient_profile,
+        historical_records=historical_records,
     )
 
     logger.info(f"설문 완료 — AI 요약 백그라운드 트리거 (record_id={record_id})")
