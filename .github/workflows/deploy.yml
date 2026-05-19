@@ -85,3 +85,4 @@ jobs:
             --set-env-vars=AI_SERVICE_URL=https://capd-ai-cdwaxwdxfa-du.a.run.app
             --allow-unauthenticated
             --port=8000
+            --timeout=3600

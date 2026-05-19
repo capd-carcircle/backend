@@ -3,10 +3,10 @@ AI 백그라운드 작업 서비스
 - records.py / surveys.py 양쪽에서 공통으로 사용하는 AI 관련 백그라운드 로직
 - 라우터 간 직접 import 방지를 위해 서비스 레이어로 분리
 
-변경사항 (v2):
-- compute_historical_context: ExchangeRecord 포함한 raw historical_records 추가 반환
-- ai_question_background / summary_background: historical_records를 ai/ 서버에 전달
-  → ai/ 서버에서 data_engineering + analytics 수행 후 2-LLM 파이프라인 적용
+변경사항 (v3 — SSE 리팩토링):
+- ai_question_background / _ai_in_progress 제거 → SSE 방식(surveys.py)으로 대체
+- summary_background: 기존 유지 (AI 설문 제출 시 백그라운드 요약 생성)
+- compute_historical_context: ExchangeRecord 포함한 raw historical_records 반환
 """
 import json
 import logging
@@ -25,8 +25,7 @@ logger = logging.getLogger(__name__)
 AI_SERVER_URL = settings.AI_SERVICE_URL
 MAX_AI_QUESTIONS = 5
 
-# 중복 실행 방지 (TODO: 서비스 확장 시 Redis로 교체)
-_ai_in_progress: set = set()
+# 요약 중복 실행 방지 (TODO: 서비스 확장 시 Redis로 교체)
 _summary_in_progress: set = set()
 
 
@@ -169,80 +168,6 @@ def compute_historical_context(db: Session, patient_id: int, current_record_id: 
         "context":            simple_context,
         "historical_records": historical_records,
     }
-
-
-# ── AI 질문 생성 백그라운드 함수 ──────────────────────────────────
-
-def ai_question_background(
-    record_id: int,
-    patient_id: int,
-    record_data: dict,
-    rejected_keys: list,
-    historical_context: dict = None,      # 기존 단순 집계 (하위 호환)
-    patient_profile: dict = None,
-    historical_records: list[dict] = None, # ai/ 서버용 raw 과거 기록
-):
-    """
-    백그라운드에서 ai/ 서버의 /ai-questions/generate 호출
-    historical_records 전달 → ai/ 서버에서 analytics + 2-LLM 파이프라인 수행
-    """
-    db = SessionLocal()
-    try:
-        current_count = db.query(AIQuestion).filter(
-            AIQuestion.daily_record_id == record_id
-        ).count()
-
-        if current_count >= MAX_AI_QUESTIONS:
-            logger.info(f"record_id={record_id} 이미 질문 {current_count}개 — AI 서버 생략")
-            return
-
-        with httpx.Client(timeout=90.0) as client:
-            resp = client.post(
-                f"{AI_SERVER_URL}/ai-questions/generate",
-                json={
-                    "record_data":        record_data,
-                    "rejected_keys":      rejected_keys,
-                    "historical_context": historical_context or {},
-                    "patient_profile":    patient_profile or {},
-                    "historical_records": historical_records or [],
-                },
-            )
-            resp.raise_for_status()
-            ai_questions = resp.json().get("questions", [])
-
-        added = 0
-        for q_data in ai_questions:
-            current_count = db.query(AIQuestion).filter(
-                AIQuestion.daily_record_id == record_id
-            ).count()
-            if current_count >= MAX_AI_QUESTIONS:
-                break
-
-            q_type_str = q_data.get("question_type", "yes_no")
-            try:
-                q_type = AIQuestionType(q_type_str)
-            except ValueError:
-                q_type = AIQuestionType.yes_no
-
-            db.add(AIQuestion(
-                daily_record_id=record_id,
-                patient_id=patient_id,
-                question_text=q_data["question_text"],
-                reason=q_data.get("reason"),
-                question_type=q_type,
-                options=json.dumps(q_data["options"], ensure_ascii=False) if q_data.get("options") is not None else None,
-            ))
-            added += 1
-
-        db.commit()
-        logger.info(f"AI 서버 질문 {added}개 저장 완료 (record_id={record_id})")
-
-    except Exception as e:
-        logger.warning(f"AI 서버 질문 생성 실패 (record_id={record_id}): {e}")
-        db.rollback()
-    finally:
-        _ai_in_progress.discard(record_id)
-        db.close()
 
 
 # ── AI 요약 백그라운드 함수 ─────────────────────────────────────────

@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from typing import List
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -15,7 +15,6 @@ from app.crud.daily_record import (
     get_record_by_id,
     update_daily_record,
 )
-from app.models.patient_note import PatientNote
 from app.models.question import AIQuestion, AIQuestionStatus, CommonQuestion
 from app.models.record import DailyRecord, ExchangeRecord, RecordStatus
 from app.models.survey import SurveyResponse
@@ -146,7 +145,6 @@ def update_record(
 )
 def finalize_record(
     record_id: int,
-    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -159,95 +157,10 @@ def finalize_record(
     if record.status != RecordStatus.draft:
         raise HTTPException(status_code=409, detail="이미 제출된 기록입니다.")
 
-    # draft → submitted
+    # draft → submitted (AI 질문 생성은 SSE 방식으로 surveys.py에서 처리)
     record.status = RecordStatus.submitted
     record.submitted_at = datetime.now(timezone.utc)
     db.commit()
-    db.refresh(record)
-
-    # AI 질문 생성 — Gemini가 전담 (백그라운드)
-    from app.services.ai_background import (
-        ai_question_background,
-        _ai_in_progress,
-        compute_historical_context,
-    )
-    from app.models.survey import RejectedQPattern
-
-    # 기존 AI 질문 초기화
-    db.query(AIQuestion).filter(
-        AIQuestion.daily_record_id == record_id
-    ).delete()
-    db.commit()
-
-    # 오늘 기록 exchange_records 조회
-    today_exchanges = (
-        db.query(ExchangeRecord)
-        .filter(ExchangeRecord.daily_record_id == record_id)
-        .order_by(ExchangeRecord.session_number)
-        .all()
-    )
-    today_exchange_list = [
-        {
-            "session_number":         ex.session_number,
-            "exchange_time":          ex.exchange_time,
-            "drainage_volume":        float(ex.drainage_volume) if ex.drainage_volume is not None else None,
-            "infusion_concentration": float(ex.infusion_concentration) if ex.infusion_concentration is not None else None,
-            "infusion_weight":        float(ex.infusion_weight) if ex.infusion_weight is not None else None,
-            "ultrafiltration":        float(ex.ultrafiltration) if ex.ultrafiltration is not None else None,
-        }
-        for ex in today_exchanges
-    ]
-
-    # 오늘 기록 dict 구성 (exchange_records 포함)
-    record_data = {
-        "date":                  str(record.record_date),
-        "weight":                float(record.weight) if record.weight else None,
-        "blood_pressure":        record.blood_pressure,
-        "total_ultrafiltration": float(record.total_ultrafiltration) if record.total_ultrafiltration else None,
-        "turbid_peritoneal":     record.turbid_peritoneal,
-        "fasting_blood_glucose": float(record.fasting_blood_glucose) if record.fasting_blood_glucose else None,
-        "urine_count":           record.urine_count,
-        "memo":                  record.memo,
-        "exchange_records":      today_exchange_list,
-    }
-
-    # 거절된 질문 패턴 조회
-    rejected_keys = [
-        r.pattern for r in db.query(RejectedQPattern).filter(
-            (RejectedQPattern.patient_id == current_user.id)
-            | (RejectedQPattern.patient_id.is_(None))
-        ).all()
-    ]
-
-    # 과거 추세 데이터 계산 (exchange_records 포함한 raw 데이터)
-    hist_result = compute_historical_context(db, current_user.id, record_id)
-    historical_context = hist_result["context"]
-    historical_records = hist_result["historical_records"]
-
-    # 환자 프로필 조회 (self_memo + 담당 의사 메모)
-    doctor_note_row = (
-        db.query(PatientNote)
-        .filter(PatientNote.patient_id == current_user.id)
-        .order_by(PatientNote.updated_at.desc())
-        .first()
-    )
-    patient_profile = {
-        "self_memo":   current_user.self_memo if current_user.self_memo else None,
-        "doctor_note": doctor_note_row.content if doctor_note_row and doctor_note_row.content else None,
-    }
-
-    _ai_in_progress.add(record_id)
-    background_tasks.add_task(
-        ai_question_background,
-        record_id=record_id,
-        patient_id=current_user.id,
-        record_data=record_data,
-        rejected_keys=rejected_keys,
-        historical_context=historical_context,
-        patient_profile=patient_profile,
-        historical_records=historical_records,
-    )
-
     db.refresh(record)
     return record
 
