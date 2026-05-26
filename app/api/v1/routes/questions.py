@@ -349,6 +349,36 @@ def reject_ai_question(
     return {"success": True, "scope": body.scope, "question_id": question_id}
 
 
+@router.patch(
+    "/ai/{question_id}/review",
+    summary="AI 질문 확인 토글 (pending ↔ approved, 의사 전용)",
+)
+def review_ai_question(
+    question_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    _require_doctor(current_user)
+
+    q = db.query(AIQuestion).filter(AIQuestion.id == question_id).first()
+    if not q:
+        raise HTTPException(status_code=404, detail="질문을 찾을 수 없습니다.")
+    _verify_doctor_patient_access(db, current_user.id, q.patient_id)
+
+    if q.status == AIQuestionStatus.pending:
+        q.status = AIQuestionStatus.approved
+    elif q.status == AIQuestionStatus.approved:
+        q.status = AIQuestionStatus.pending
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="거절된 질문은 복구 엔드포인트(/restore)를 사용하세요.",
+        )
+
+    db.commit()
+    return {"success": True, "status": q.status.value, "question_id": question_id}
+
+
 @router.post(
     "/ai/{question_id}/restore",
     summary="AI 질문 복구 (거절 → 검토 대기, 의사 전용)",
