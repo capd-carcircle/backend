@@ -624,3 +624,79 @@ def export_patient_records(
         "doctor_name": current_user.name,
         "exported_at": datetime.now(timezone.utc).isoformat(),
     }
+
+
+# ── 담당의사 인수인계 (의사용) ─────────────────────────────────
+
+class HandoverRequest(BaseModel):
+    new_doctor_id: int
+
+
+@router.post(
+    "/{patient_id}/handover",
+    summary="담당 환자 인수인계 (다른 의사에게 자동 이관)",
+    status_code=status.HTTP_200_OK,
+)
+def handover_patient(
+    patient_id: int,
+    payload: HandoverRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """현재 담당 의사가 다른 의사에게 환자를 인수인계.
+    1) 현재 담당 assignment 종료
+    2) 새 의사에게 즉시(자동 승인) 연결
+    """
+    _require_doctor(current_user)
+
+    # 새 의사 존재 확인
+    new_doctor = db.query(User).filter(
+        User.id == payload.new_doctor_id, User.role == UserRole.doctor
+    ).first()
+    if not new_doctor:
+        raise HTTPException(status_code=404, detail="대상 의사를 찾을 수 없습니다.")
+    if new_doctor.id == current_user.id:
+        raise HTTPException(status_code=400, detail="자기 자신에게는 인수인계할 수 없습니다.")
+
+    patient = db.query(User).filter(User.id == patient_id, User.role == UserRole.patient).first()
+    if not patient:
+        raise HTTPException(status_code=404, detail="환자를 찾을 수 없습니다.")
+
+    # 현재 담당 관계 확인
+    assignment = _get_current_assignment(db, current_user.id, patient_id)
+    if not assignment and patient.doctor_id != current_user.id:
+        raise HTTPException(status_code=403, detail="현재 담당 환자가 아닙니다.")
+
+    now = datetime.now(timezone.utc)
+
+    # 1) 이 환자에 대한 모든 active assignment 종료 (unique 제약 위반 방지)
+    active_assignments = (
+        db.query(PatientDoctorAssignment)
+        .filter(
+            PatientDoctorAssignment.patient_id == patient_id,
+            PatientDoctorAssignment.ended_at.is_(None),
+        )
+        .all()
+    )
+    for a in active_assignments:
+        a.ended_at = now
+
+    # flush: UPDATE 먼저 적용 후 INSERT (unique constraint 순서 보장)
+    db.flush()
+
+    # 2) 새 의사 assignment 생성 (자동 승인)
+    new_assignment = PatientDoctorAssignment(
+        patient_id=patient_id,
+        doctor_id=new_doctor.id,
+        started_at=now,
+    )
+    db.add(new_assignment)
+
+    # 3) users.doctor_id 업데이트
+    patient.doctor_id = new_doctor.id
+
+    db.commit()
+    return {
+        "message": f"{patient.name} 환자가 {new_doctor.name} 의사에게 인수인계되었습니다.",
+        "new_doctor_name": new_doctor.name,
+    }
