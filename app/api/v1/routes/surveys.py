@@ -93,6 +93,8 @@ def save_survey_responses(
         raise HTTPException(status_code=404, detail="기록을 찾을 수 없습니다.")
     if record.patient_id != current_user.id:
         raise HTTPException(status_code=403, detail="접근 권한이 없습니다.")
+    if record.risk_level is not None:
+        raise HTTPException(status_code=409, detail="이미 제출된 설문입니다. 수정할 수 없습니다.")
 
     saved = 0
     for item in body.responses:
@@ -505,6 +507,8 @@ def submit_common_survey(
         raise HTTPException(status_code=404, detail="기록을 찾을 수 없습니다.")
     if record.patient_id != current_user.id:
         raise HTTPException(status_code=403, detail="접근 권한이 없습니다.")
+    if record.risk_level is not None:
+        raise HTTPException(status_code=409, detail="이미 제출된 설문입니다. 수정할 수 없습니다.")
 
     saved = 0
     for item in body.responses:

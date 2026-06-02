@@ -322,6 +322,8 @@ def approve_record(
     _verify_doctor_patient_access(db, current_user.id, record.patient_id, current_only=True)
     if record.status == RecordStatus.reviewed:
         raise HTTPException(status_code=409, detail="이미 승인된 기록입니다.")
+    if record.risk_level is None:
+        raise HTTPException(status_code=400, detail="환자가 아직 설문을 완료하지 않았습니다.")
 
     record.status      = RecordStatus.reviewed
     record.approved_by = current_user.id
@@ -378,6 +380,8 @@ def bulk_approve_records(
         r = db.query(DailyRecord).filter(DailyRecord.id == rid).first()
         if not r or r.status == RecordStatus.reviewed:
             continue
+        if r.risk_level is None:
+            continue  # 설문 미완료 기록은 일괄 승인에서 제외
         # 현재 담당 의사인지 확인 (담당 아닌 기록은 skip)
         has_access = db.query(PatientDoctorAssignment).filter(
             PatientDoctorAssignment.doctor_id == current_user.id,
