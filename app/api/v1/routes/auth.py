@@ -156,12 +156,25 @@ def update_me(
     self_memo(환자 전용)은 별도 비밀번호 확인 없이 저장 가능.
     이름·생년월일·전화번호는 UI에서 수정 불가 처리됨.
     """
-    # 비밀번호 변경 시 현재 비밀번호 필수
-    if payload.new_password:
+    # 프로필 변경(이름/전화번호/생년월일) 또는 비밀번호 변경 시 현재 비밀번호 필수
+    profile_changing = payload.name or payload.phone_number or payload.birth_date or payload.new_password
+    if profile_changing:
         if not payload.current_password:
             raise HTTPException(status_code=400, detail="현재 비밀번호를 입력해주세요.")
         if not verify_password(payload.current_password, current_user.password_hash):
             raise HTTPException(status_code=400, detail="현재 비밀번호가 올바르지 않습니다.")
+
+    # 이름/전화번호/생년월일 수정
+    if payload.name:
+        current_user.name = payload.name
+    if payload.phone_number:
+        current_user.phone_number = payload.phone_number
+    if payload.birth_date is not None and current_user.role != UserRole.patient:
+        # 의사 생년월일은 doctor_profiles 테이블에 있으나 일단 skip (별도 처리 필요 시 추가)
+        pass
+
+    # 비밀번호 변경
+    if payload.new_password:
         if len(payload.new_password) < 6:
             raise HTTPException(status_code=400, detail="비밀번호는 6자 이상이어야 합니다.")
         current_user.password_hash = hash_password(payload.new_password)
