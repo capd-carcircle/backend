@@ -236,13 +236,18 @@ def list_patients_overview(
             assignment_ended_at   = assignment.ended_at.isoformat() if assignment and assignment.ended_at else None,
         )
 
-    # assignment 기반 환자 처리 (환자당 가장 최근 assignment 하나씩)
+    # assignment 기반 환자 처리 — 배치 로딩으로 N+1 방지
+    asgn_patient_ids = list({a.patient_id for a in assignments})
+    patients_map: dict[int, User] = {
+        p.id: p
+        for p in db.query(User).filter(User.id.in_(asgn_patient_ids)).all()
+    }
     seen_patients: set[int] = set()
     for asgn in assignments:
         if asgn.patient_id in seen_patients:
             continue
         seen_patients.add(asgn.patient_id)
-        patient = db.query(User).filter_by(id=asgn.patient_id).first()
+        patient = patients_map.get(asgn.patient_id)
         if not patient:
             continue
         result.append(_make_overview(patient, asgn, is_current))

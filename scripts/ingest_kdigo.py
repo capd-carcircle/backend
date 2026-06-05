@@ -46,8 +46,8 @@ _CONTAINER_PATH = BACKEND_ROOT / "capd-materials" / "KDIGO"
 _LOCAL_PATH = PROJECT_ROOT / "26년-capd-materials" / "KDIGO"
 KDIGO_DIR = Path(os.getenv("KDIGO_DIR", _CONTAINER_PATH if _CONTAINER_PATH.exists() else _LOCAL_PATH))
 EMBED_MODEL = "all-MiniLM-L6-v2"   # 384차원, 영어 특화, 80MB
-CHUNK_SIZE  = 500                   # 청크 최대 글자 수
-CHUNK_OVERLAP = 50                  # 청크 간 겹침 글자 수
+CHUNK_SIZE  = 800                   # 청크 최대 글자 수
+CHUNK_OVERLAP = 150                 # 청크 간 겹침 글자 수
 BATCH_SIZE  = 8                     # 임베딩 배치 크기 (메모리 절약을 위해 작게 유지)
 
 

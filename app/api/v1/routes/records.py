@@ -403,14 +403,20 @@ def bulk_approve_records(
 def _parse_emr_soap(emr_soap: str) -> dict:
     """
     Gemini가 생성한 "S: ...\nO: ...\nA: ...\nP: ..." 문자열을 파싱.
-    각 섹션이 없으면 빈 문자열 반환.
+    섹션 경계를 기준으로 분할하여 각 내용을 추출.
+    섹션이 없으면 빈 문자열 반환.
     """
     import re
     result = {"S": "", "O": "", "A": "", "P": ""}
-    for key in ["S", "O", "A", "P"]:
-        m = re.search(rf'(?:^|\n){key}:\s*(.*?)(?=\n[SOAP]:|$)', emr_soap, re.DOTALL)
-        if m:
-            result[key] = m.group(1).strip()
+    # 각 SOAP 섹션 시작 위치를 순서대로 탐색
+    pattern = re.compile(r'(?:^|\n)([SOAP]):\s*')
+    matches = list(pattern.finditer(emr_soap))
+    for i, m in enumerate(matches):
+        key = m.group(1)
+        content_start = m.end()
+        # 다음 섹션 시작 직전까지 추출 (P는 문자열 끝까지)
+        content_end = matches[i + 1].start() if i + 1 < len(matches) else len(emr_soap)
+        result[key] = emr_soap[content_start:content_end].strip()
     return result
 
 
@@ -473,23 +479,23 @@ def _build_emr(record: DailyRecord, exchanges: list, patient: User) -> dict:
     bg   = f"{float(record.fasting_blood_glucose):.0f} mg/dL" if record.fasting_blood_glucose is not None else "미측정"
     sess = len([e for e in exchanges if e.exchange_time])
 
-    # S
-    s_problems = []
+    # S — 환자가 직접 호소하거나 기재한 주관적 증상 (설문/메모 기반)
+    s_parts = []
     if record.turbid_peritoneal:
-        s_problems.append("혼탁 투석액 관찰")
-    memo_str = f" 메모: {record.memo}" if record.memo else ""
-    s = (
-        f"환자 CAPD {sess}회 시행."
-        + (f" {', '.join(s_problems)}." if s_problems else " 복통 없음. 흐린 투석액 없음.")
-        + memo_str
-    )
+        s_parts.append("혼탁 투석액 호소")
+    else:
+        s_parts.append("복통 및 혼탁 투석액 없음")
+    if record.memo:
+        s_parts.append(f"환자 메모: {record.memo}")
+    s = ". ".join(s_parts) + f". (CAPD {sess}회 시행)"
 
     # O
-    uf_str = f"{uf:+.0f}g" if uf is not None else "N/A"
+    uf_str    = f"{uf:+.0f}g" if uf is not None else "미측정"
+    urine_str = f"{record.urine_count}회" if record.urine_count is not None else "미측정"
     o = (
         f"체중 {wt}. 혈압 {bp} mmHg. 공복혈당 {bg}. "
         f"총 제수량 {uf_str}. 총 투석 배액량 {total_drain:.0f}g. "
-        f"소변량 {record.urine_count}회."
+        f"소변량 {urine_str}."
     )
 
     # A
@@ -502,6 +508,8 @@ def _build_emr(record: DailyRecord, exchanges: list, patient: User) -> dict:
             a_parts.append(f"혈압 {record.blood_pressure} mmHg — 고혈압 2도")
         elif systolic > 140:
             a_parts.append(f"혈압 {record.blood_pressure} mmHg — 고혈압 1도")
+        elif 0 < systolic < 90:
+            a_parts.append(f"혈압 {record.blood_pressure} mmHg — 저혈압, 체위성 저혈압 및 탈수 여부 확인 필요")
     except Exception:
         pass
     if record.fasting_blood_glucose and float(record.fasting_blood_glucose) > 180:
