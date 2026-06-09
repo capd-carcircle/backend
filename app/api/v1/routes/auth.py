@@ -169,9 +169,8 @@ def update_me(
         current_user.name = payload.name
     if payload.phone_number:
         current_user.phone_number = payload.phone_number
-    if payload.birth_date is not None and current_user.role != UserRole.patient:
-        # 의사 생년월일은 doctor_profiles 테이블에 있으나 일단 skip (별도 처리 필요 시 추가)
-        pass
+    # birth_date: 의사는 doctor_profiles 테이블 관리, 환자는 본인확인 필드로 UI 잠금.
+    # 현재 양쪽 모두 수정 비활성화. 변경 필요 시 별도 엔드포인트로 구현할 것.
 
     # 비밀번호 변경
     if payload.new_password:

@@ -375,26 +375,48 @@ def bulk_approve_records(
     current_user: User = Depends(get_current_user),
 ):
     _require_doctor(current_user)
+    if not body.record_ids:
+        return {"approved": [], "total": 0}
+
     now = datetime.now(timezone.utc)
+
+    # N+1 방지: record_ids 전체를 한 번에 조회
+    records = (
+        db.query(DailyRecord)
+        .filter(DailyRecord.id.in_(body.record_ids))
+        .all()
+    )
+    records_map = {r.id: r for r in records}
+
+    # 승인 대상 기록의 patient_id 목록으로 현재 담당 assignment 한 번에 조회
+    patient_ids = {r.patient_id for r in records}
+    current_assignments = (
+        db.query(PatientDoctorAssignment.patient_id)
+        .filter(
+            PatientDoctorAssignment.doctor_id == current_user.id,
+            PatientDoctorAssignment.patient_id.in_(patient_ids),
+            PatientDoctorAssignment.ended_at.is_(None),
+        )
+        .all()
+    )
+    authorized_patient_ids = {row.patient_id for row in current_assignments}
+
     approved = []
     for rid in body.record_ids:
-        r = db.query(DailyRecord).filter(DailyRecord.id == rid).first()
-        if not r or r.status == RecordStatus.reviewed:
+        r = records_map.get(rid)
+        if not r:
+            continue
+        if r.status == RecordStatus.reviewed:
             continue
         if r.risk_level is None:
             continue  # 설문 미완료 기록은 일괄 승인에서 제외
-        # 현재 담당 의사인지 확인 (담당 아닌 기록은 skip)
-        has_access = db.query(PatientDoctorAssignment).filter(
-            PatientDoctorAssignment.doctor_id == current_user.id,
-            PatientDoctorAssignment.patient_id == r.patient_id,
-            PatientDoctorAssignment.ended_at.is_(None),
-        ).first()
-        if not has_access:
-            continue
+        if r.patient_id not in authorized_patient_ids:
+            continue  # 현재 담당 아닌 기록은 skip
         r.status      = RecordStatus.reviewed
         r.approved_by = current_user.id
         r.updated_at  = now
         approved.append(rid)
+
     db.commit()
     return {"approved": approved, "total": len(approved)}
 
