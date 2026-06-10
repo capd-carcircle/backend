@@ -423,10 +423,12 @@ class AssignPatientRequest(BaseModel):
     patient_id: int
 
 
+# DEPRECATED: 대응 UI 없음(연결은 환자 요청 → 의사 승인 플로우 사용). 프론트 미사용.
 @router.post(
     "/assign",
-    summary="환자 담당 연결 (의사가 직접)",
+    summary="[DEPRECATED] 환자 담당 연결 (의사가 직접 — 대응 UI 없음)",
     status_code=status.HTTP_201_CREATED,
+    deprecated=True,
 )
 def assign_patient(
     payload: AssignPatientRequest,

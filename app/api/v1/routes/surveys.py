@@ -45,10 +45,12 @@ MAX_AI_QUESTIONS = 5   # AI 질문 최대 개수
 
 
 # ── GET AI 맞춤 질문 조회 ──────────────────────────────────
+# DEPRECATED: 구 폴링 방식 — SSE(/{record_id}/ai-questions/stream)로 대체됨. 프론트 미사용.
 @router.get(
     "/ai-questions/{record_id}",
     response_model=List[AIQuestionResponse],
-    summary="AI 맞춤 질문 조회",
+    summary="[DEPRECATED] AI 맞춤 질문 조회 (구 폴링 — SSE로 대체)",
+    deprecated=True,
 )
 def get_ai_questions(
     record_id: int,
@@ -75,10 +77,12 @@ def get_ai_questions(
 
 
 # ── POST 설문 응답 저장/수정 (upsert) ─────────────────────
+# DEPRECATED: 구 일괄 제출 — SSE Step1(/{id}/common)·Step3(/{id}/ai)로 대체됨. 프론트 미사용.
 @router.post(
     "/responses",
     response_model=SurveySubmitResponse,
-    summary="설문 응답 저장 (upsert — 부분 저장·재답변 모두 가능)",
+    summary="[DEPRECATED] 설문 응답 저장 (구 일괄 제출 — SSE로 대체)",
+    deprecated=True,
 )
 def save_survey_responses(
     body: SurveySubmitRequest,
@@ -244,9 +248,11 @@ def get_my_survey_responses(
 
 
 # ── GET 전체 질문 + 답변 조회 (의사용) ────────────────────
+# DEPRECATED: /records/{id}/detail이 대체함. 프론트 미사용.
 @router.get(
     "/responses/{record_id}",
-    summary="기록별 전체 질문 + 답변 조회 (의사 전용)",
+    summary="[DEPRECATED] 기록별 전체 질문 + 답변 조회 (의사 전용 — /records/{id}/detail로 대체)",
+    deprecated=True,
 )
 def get_survey_responses(
     record_id: int,
@@ -329,9 +335,11 @@ def get_survey_responses(
 
 
 # ── POST 설문 완료 + AI 요약 트리거 (백그라운드) ──────────
+# DEPRECATED: 구 트리거 — /{record_id}/ai가 대체함. 프론트 미사용.
 @router.post(
     "/complete/{record_id}",
-    summary="설문 완료 — AI 종합 요약 백그라운드 생성 트리거",
+    summary="[DEPRECATED] 설문 완료 트리거 (구 — /{record_id}/ai로 대체)",
+    deprecated=True,
 )
 def complete_survey(
     record_id: int,

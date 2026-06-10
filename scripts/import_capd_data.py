@@ -56,7 +56,7 @@ log = logging.getLogger(__name__)
 
 # ── 기본값 ────────────────────────────────────────────────────────────────────
 DEFAULT_DB_URL    = "postgresql://capd_user:capd_pass@localhost:5432/capd"
-DEFAULT_PASSWORD  = "capd1234"
+DEFAULT_PASSWORD  = "12345678"
 DEFAULT_START     = date(2025, 12, 1)
 DEFAULT_END       = date(2025, 12, 31)
 
@@ -108,19 +108,36 @@ def _to_int(v) -> int | None:
 # 환자 계정 생성
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def ensure_patients(db, patients_index: list, password: str) -> dict[str, int]:
+def ensure_patients(db, patients_index: list, password: str, data_dir: Path) -> dict[str, int]:
     """
     patients_index 목록을 보고 DB에 없는 계정만 생성.
+    profile.json에서 성별·나이를 읽어 birth_date·gender·self_memo도 함께 저장.
     반환: { "patient_001": user_id, ... }
     """
     mapping: dict[str, int] = {}
 
     for p in patients_index:
         pid   = p["patient_id"]                          # "patient_001"
-        # 전화번호 기반: 010 + 00001 ~ 00010 형태 더미 번호
-        num_part = pid.replace("patient_", "").zfill(5)  # "001" → "00001"
-        phone_number = f"010{num_part}"                  # "01000001"
+        num_part = pid.replace("patient_", "").zfill(8)  # "001" → "00000001"
+        phone_number = f"010{num_part}"                  # "01000000001"
         name  = f"환자 {pid.replace('patient_', '')}"    # "환자 001"
+
+        # profile.json에서 성별·나이·동반질환 읽기
+        profile_path = data_dir / pid / "profile.json"
+        gender = "m"
+        birth_date = None
+        self_memo = None
+        if profile_path.exists():
+            with open(profile_path, encoding="utf-8") as f:
+                prof = json.load(f)
+            gender = "f" if str(prof.get("sex", "M")).upper() == "F" else "m"
+            age = prof.get("age")
+            if age:
+                birth_year = 2025 - int(age)
+                birth_date = f"{birth_year}-01-01"
+            comorbidities = prof.get("comorbidities", [])
+            if comorbidities:
+                self_memo = "동반질환: " + ", ".join(comorbidities)
 
         row = db.execute(
             text("SELECT id FROM users WHERE phone_number = :p"),
@@ -133,15 +150,26 @@ def ensure_patients(db, patients_index: list, password: str) -> dict[str, int]:
         else:
             result = db.execute(
                 text("""
-                    INSERT INTO users (phone_number, password_hash, name, role, is_active, created_at, updated_at)
-                    VALUES (:phone_number, :pw, :name, 'patient', true, now(), now())
+                    INSERT INTO users
+                        (phone_number, password_hash, name, birth_date, gender, self_memo,
+                         role, is_active, created_at, updated_at)
+                    VALUES
+                        (:phone_number, :pw, :name, :birth_date, :gender, :self_memo,
+                         'patient', true, now(), now())
                     RETURNING id
                 """),
-                {"phone_number": phone_number, "pw": _hash(password), "name": name},
+                {
+                    "phone_number": phone_number,
+                    "pw": _hash(password),
+                    "name": name,
+                    "birth_date": birth_date,
+                    "gender": gender,
+                    "self_memo": self_memo,
+                },
             )
             new_id = result.fetchone()[0]
             mapping[pid] = new_id
-            log.info(f"  신규 계정 생성: {phone_number} (id={new_id})")
+            log.info(f"  신규 계정 생성: {phone_number} / {gender} / {birth_date} (id={new_id})")
 
     db.commit()
     return mapping
@@ -490,7 +518,7 @@ def main():
 
     # ── 환자 계정 생성/확인 ───────────────────────────────────────────────────
     log.info("\n[1/3] 환자 계정 확인/생성")
-    patient_map = ensure_patients(db, patients_index, args.password)
+    patient_map = ensure_patients(db, patients_index, args.password, data_dir)
 
     # ── 기존 기록 초기화 ──────────────────────────────────────────────────────
     if args.clear:
@@ -519,7 +547,8 @@ def main():
     log.info("")
     log.info("테스트 계정 (비밀번호: {})".format(args.password))
     for pid, uid in patient_map.items():
-        log.info(f"  {pid}@capd.com  (id={uid})")
+        num = pid.replace("patient_", "").zfill(8)
+        log.info(f"  010{num}  (id={uid})")
     log.info("=" * 60)
 
     db.close()
