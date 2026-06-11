@@ -312,21 +312,14 @@ def list_patient_records(
         for r in records
     ]
 
-    # 성별 변환 (DB: 'm'/'f' → 'male'/'female')
     gender_map = {'m': 'male', 'f': 'female'}
-    gender_val = gender_map.get(patient.gender, patient.gender) if patient.gender else None
-
-    # birth_date: doctor_profiles 우선, users.birth_date 폴백
-    from app.models.doctor import DoctorProfile
-    dp = db.query(DoctorProfile).filter(DoctorProfile.user_id == patient.id).first()
-    birth = None
-    if hasattr(patient, 'birth_date') and patient.birth_date:
-        birth = patient.birth_date.isoformat() if hasattr(patient.birth_date, 'isoformat') else str(patient.birth_date)
+    gender_val = gender_map.get(patient.gender or '', patient.gender) if patient.gender else None
+    birth_val  = str(patient.birth_date) if patient.birth_date else None
 
     return PatientRecordsResponse(
         patient_id   = patient.id,
         patient_name = patient.name,
-        birth_date   = birth,
+        birth_date   = birth_val,
         gender       = gender_val,
         phone_number = patient.phone_number,
         records      = rows,
