@@ -40,6 +40,7 @@ class PatientRecordRow(BaseModel):
     record_date:  str
     submitted_at: Optional[str]
     status:       str
+    risk_level:   Optional[str] = None
 
 class PatientRecordsResponse(BaseModel):
     patient_id:   int
@@ -303,6 +304,7 @@ def list_patient_records(
             record_date  = r.record_date.isoformat(),
             submitted_at = r.submitted_at.isoformat() if r.submitted_at else None,
             status       = r.status.value,
+            risk_level   = r.risk_level.value if r.risk_level else None,
         )
         for r in records
     ]
