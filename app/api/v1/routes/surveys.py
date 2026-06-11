@@ -628,7 +628,7 @@ async def stream_ai_questions(
         return StreamingResponse(not_found(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
-    # 이미 AI 질문이 있으면 기존 질문 즉시 스트리밍
+    # 이미 AI 질문이 있으면 기존 질문 + 기존 답변 즉시 스트리밍
     existing_questions = (
         db.query(AIQuestion)
         .filter(
@@ -638,6 +638,16 @@ async def stream_ai_questions(
         .all()
     )
     if existing_questions:
+        existing_ai_responses = (
+            db.query(SurveyResponse)
+            .filter(
+                SurveyResponse.daily_record_id == record_id,
+                SurveyResponse.question_type == "ai",
+            )
+            .all()
+        )
+        resp_map = {r.question_id: r for r in existing_ai_responses}
+
         async def replay_existing():
             for idx, q in enumerate(existing_questions):
                 opts = None
@@ -646,12 +656,15 @@ async def stream_ai_questions(
                         opts = json.loads(q.options)
                     except Exception:
                         opts = None
+                r = resp_map.get(q.id)
                 data = json.dumps({
-                    "question_id":   q.id,
-                    "question_text": q.question_text,
-                    "question_type": q.question_type.value if q.question_type else "yes_no",
-                    "options":       opts,
-                    "reason":        q.reason,
+                    "question_id":          q.id,
+                    "question_text":        q.question_text,
+                    "question_type":        q.question_type.value if q.question_type else "yes_no",
+                    "options":              opts,
+                    "reason":               q.reason,
+                    "existing_choice":      r.choice.value if r and r.choice else None,
+                    "existing_text_answer": r.text_answer if r else None,
                 }, ensure_ascii=False)
                 yield f"id: {idx}\ndata: {data}\n\n"
             yield "event: done\ndata: {}\n\n"
@@ -876,26 +889,42 @@ def submit_ai_survey(
     if record.patient_id != current_user.id:
         raise HTTPException(status_code=403, detail="접근 권한이 없습니다.")
 
-    # 중복 제출 방지
-    if record.risk_level is not None:
-        raise HTTPException(status_code=409, detail="이미 제출된 설문입니다.")
+    # 요약 생성 중이면 대기 중 안내
     if effective_record_id in _summary_in_progress:
         raise HTTPException(status_code=409, detail="AI 요약이 이미 생성 중입니다.")
 
-    # AI 질문 답변 저장
+    # 기존 AI 답변과 비교해서 변경 여부 확인
+    existing_responses = (
+        db.query(SurveyResponse)
+        .filter(
+            SurveyResponse.daily_record_id == effective_record_id,
+            SurveyResponse.question_type == "ai",
+        )
+        .all()
+    )
+    existing_map = {r.question_id: r for r in existing_responses}
+
+    answers_changed = False
+    for item in body.responses:
+        if item.choice is None and not item.text_answer:
+            continue
+        prev = existing_map.get(item.question_id)
+        if prev is None:
+            answers_changed = True
+            break
+        old_choice = prev.choice.value if prev.choice else None
+        old_text   = prev.text_answer or ""
+        new_text   = item.text_answer or ""
+        if item.choice != old_choice or new_text != old_text:
+            answers_changed = True
+            break
+
+    # AI 질문 답변 저장 (upsert)
     saved = 0
     for item in body.responses:
         if item.choice is None and not item.text_answer:
             continue
-        existing = (
-            db.query(SurveyResponse)
-            .filter(
-                SurveyResponse.daily_record_id == effective_record_id,
-                SurveyResponse.question_id == item.question_id,
-                SurveyResponse.question_type == item.question_type,
-            )
-            .first()
-        )
+        existing = existing_map.get(item.question_id)
         if existing:
             if item.choice is not None:
                 existing.choice = SurveyChoice(item.choice)
@@ -911,6 +940,19 @@ def submit_ai_survey(
                 text_answer=item.text_answer or "",
             ))
         saved += 1
+
+    # 변경 없으면 요약 재트리거 없이 종료
+    if not answers_changed and record.risk_level is not None:
+        db.commit()
+        logger.info(f"AI 답변 재제출 (변경 없음) — 요약 유지 (record_id={effective_record_id})")
+        return {"success": True, "saved_count": saved, "summary_triggered": False}
+
+    # 변경 있으면 요약 초기화
+    if answers_changed:
+        record.risk_level = None
+        record.ai_summary = None
+        record.emr_soap   = None
+
     db.commit()
 
     # 요약용 데이터 수집
