@@ -518,19 +518,37 @@ def submit_common_survey(
     if record.status.value == "reviewed":
         raise HTTPException(status_code=409, detail="의사가 검토 완료한 기록입니다. 수정할 수 없습니다.")
 
+    # ── 기존 답변과 비교해서 실제 변경 여부 확인 ──────────────────────
+    existing_responses = (
+        db.query(SurveyResponse)
+        .filter(
+            SurveyResponse.daily_record_id == effective_record_id,
+            SurveyResponse.question_type == "common",
+        )
+        .all()
+    )
+    existing_map = {r.question_id: r for r in existing_responses}
+
+    answers_changed = False
+    for item in body.responses:
+        if item.choice is None and not item.text_answer:
+            continue
+        prev = existing_map.get(item.question_id)
+        if prev is None:
+            answers_changed = True
+            break
+        old_choice = prev.choice.value if prev.choice else None
+        old_text   = prev.text_answer or ""
+        new_text   = item.text_answer or ""
+        if item.choice != old_choice or new_text != old_text:
+            answers_changed = True
+            break
+
     saved = 0
     for item in body.responses:
         if item.choice is None and not item.text_answer:
             continue
-        existing = (
-            db.query(SurveyResponse)
-            .filter(
-                SurveyResponse.daily_record_id == effective_record_id,
-                SurveyResponse.question_id == item.question_id,
-                SurveyResponse.question_type == item.question_type,
-            )
-            .first()
-        )
+        existing = existing_map.get(item.question_id)
         if existing:
             if item.choice is not None:
                 existing.choice = SurveyChoice(item.choice)
@@ -547,21 +565,29 @@ def submit_common_survey(
             ))
         saved += 1
 
-    # 기존 AI 질문 삭제 + risk_level/ai_summary/emr_soap 초기화 → 재생성 필요
-    ai_deleted = (
-        db.query(AIQuestion)
-        .filter(AIQuestion.daily_record_id == effective_record_id)
-        .delete()
-    )
-    if ai_deleted > 0 or record.risk_level is not None:
+    # 답변이 실제로 바뀐 경우에만 AI 질문 삭제 + 요약 초기화
+    ai_deleted = 0
+    if answers_changed:
+        # AI 질문 답변(survey_responses type=ai)도 함께 삭제
+        db.query(SurveyResponse).filter(
+            SurveyResponse.daily_record_id == effective_record_id,
+            SurveyResponse.question_type == "ai",
+        ).delete()
+        ai_deleted = (
+            db.query(AIQuestion)
+            .filter(AIQuestion.daily_record_id == effective_record_id)
+            .delete()
+        )
         record.risk_level = None
         record.ai_summary = None
         record.emr_soap   = None
-        logger.info(f"공통질문 수정 — AI 질문 {ai_deleted}개 삭제, 요약 초기화 (record_id={effective_record_id})")
+        logger.info(f"공통질문 변경 감지 — AI 질문 {ai_deleted}개 + AI 응답 삭제, 요약 초기화 (record_id={effective_record_id})")
+    else:
+        logger.info(f"공통질문 재제출 (변경 없음) — AI 질문 유지 (record_id={effective_record_id})")
 
     db.commit()
     logger.info(f"공통질문 답변 {saved}개 저장 (record_id={effective_record_id})")
-    return {"success": True, "saved_count": saved, "ai_reset": ai_deleted > 0}
+    return {"success": True, "saved_count": saved, "ai_reset": answers_changed}
 
 
 # ── AI 질문 SSE 스트리밍 ────────────────────────────────────────────
