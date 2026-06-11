@@ -27,7 +27,7 @@ from app.models.question import (
 )
 from app.models.patient_note import PatientNote
 from app.models.record import DailyRecord, ExchangeRecord
-from app.models.survey import SurveyResponse, SurveyChoice
+from app.models.survey import SurveyResponse, SurveyChoice, RejectedQPattern
 from app.models.user import User, UserRole
 from app.schemas.question import AIQuestionResponse
 from app.schemas.survey import SurveySubmitRequest, SurveySubmitResponse
@@ -752,6 +752,17 @@ async def stream_ai_questions(
     hist_result        = compute_historical_context(db, current_user.id, record_id)
     historical_records = hist_result["historical_records"]
 
+    # 거절된 질문 패턴 조회 (전역 + 이 환자 전용)
+    rejected_patterns = (
+        db.query(RejectedQPattern)
+        .filter(
+            (RejectedQPattern.patient_id.is_(None)) |
+            (RejectedQPattern.patient_id == current_user.id)
+        )
+        .all()
+    )
+    rejected_keys = [p.pattern for p in rejected_patterns]
+
     # ai 서버 SSE 프록시
     saved_record_id  = record_id
     saved_patient_id = current_user.id
@@ -768,6 +779,7 @@ async def stream_ai_questions(
                         "patient_profile":           patient_profile,
                         "historical_records":        historical_records,
                         "common_question_responses": common_question_responses,
+                        "rejected_keys":             rejected_keys,
                     },
                     headers={"Content-Type": "application/json"},
                 ) as resp:
