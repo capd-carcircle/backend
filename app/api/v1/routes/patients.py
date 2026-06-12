@@ -482,12 +482,17 @@ def assign_patient(
 # ── 의사 메모 ──────────────────────────────────────────────
 
 class PatientNoteResponse(BaseModel):
-    content:    Optional[str]
-    updated_at: Optional[str]
+    content:              Optional[str]
+    updated_at:           Optional[str]
+    last_report_end_date: Optional[str]  # YYYY-MM-DD
 
 
 class PatientNoteUpsert(BaseModel):
     content: str
+
+
+class PatientReportEndDateUpsert(BaseModel):
+    end_date: str  # YYYY-MM-DD
 
 
 @router.get(
@@ -503,8 +508,12 @@ def get_patient_note(
     _require_doctor(current_user)
     note = db.query(PatientNote).filter_by(doctor_id=current_user.id, patient_id=patient_id).first()
     if not note:
-        return PatientNoteResponse(content=None, updated_at=None)
-    return PatientNoteResponse(content=note.content, updated_at=note.updated_at.isoformat())
+        return PatientNoteResponse(content=None, updated_at=None, last_report_end_date=None)
+    return PatientNoteResponse(
+        content=note.content,
+        updated_at=note.updated_at.isoformat(),
+        last_report_end_date=note.last_report_end_date.isoformat() if note.last_report_end_date else None,
+    )
 
 
 @router.put(
@@ -532,7 +541,45 @@ def upsert_patient_note(
 
     db.commit()
     db.refresh(note)
-    return PatientNoteResponse(content=note.content, updated_at=note.updated_at.isoformat())
+    return PatientNoteResponse(
+        content=note.content,
+        updated_at=note.updated_at.isoformat(),
+        last_report_end_date=note.last_report_end_date.isoformat() if note.last_report_end_date else None,
+    )
+
+
+@router.post(
+    "/{patient_id}/report-end-date",
+    response_model=PatientNoteResponse,
+    summary="요약지 생성 마지막 날짜 저장",
+)
+def save_report_end_date(
+    patient_id: int,
+    payload: PatientReportEndDateUpsert,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> PatientNoteResponse:
+    _require_doctor(current_user)
+    from datetime import date as date_type
+    try:
+        end_date = date_type.fromisoformat(payload.end_date)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="end_date 형식이 올바르지 않습니다 (YYYY-MM-DD).")
+
+    note = db.query(PatientNote).filter_by(doctor_id=current_user.id, patient_id=patient_id).first()
+    if note:
+        note.last_report_end_date = end_date
+    else:
+        note = PatientNote(doctor_id=current_user.id, patient_id=patient_id, last_report_end_date=end_date)
+        db.add(note)
+
+    db.commit()
+    db.refresh(note)
+    return PatientNoteResponse(
+        content=note.content,
+        updated_at=note.updated_at.isoformat(),
+        last_report_end_date=note.last_report_end_date.isoformat() if note.last_report_end_date else None,
+    )
 
 
 # ── 환자 수치 트렌드 (의사용) ──────────────────────────────────

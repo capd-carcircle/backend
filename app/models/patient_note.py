@@ -1,7 +1,7 @@
 """의사가 특정 환자에 대해 작성하는 단일 메모"""
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Date, DateTime, ForeignKey, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -12,6 +12,7 @@ class PatientNote(Base):
     의사 전용 환자 메모 — 환자는 열람 불가.
     (doctor_id, patient_id) UNIQUE → 의사당 환자 1개 메모 유지.
     AI 질문 생성 시 historical_context에 포함 예정.
+    last_report_end_date: 가장 최근 요약지 생성 시 마지막 날짜
     """
     __tablename__ = "patient_notes"
     __table_args__ = (
@@ -26,6 +27,7 @@ class PatientNote(Base):
         BigInteger, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
     )
     content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_report_end_date: Mapped[date | None] = mapped_column(Date, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
