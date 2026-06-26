@@ -591,10 +591,11 @@ def submit_common_survey(
     return {"success": True, "saved_count": saved, "ai_reset": answers_changed}
 
 
-# ── AI 질문 비스트리밍 생성 (test-runner 전용) ────────────────────────
+# ── AI 질문 동기 생성 (test-runner 전용) ────────────────────────────────
 @router.post(
     "/{record_id}/ai-questions/generate",
-    summary="AI 질문 생성 및 저장 (비스트리밍, test-runner 전용)",
+    status_code=200,
+    summary="AI 질문 동기 생성 — 완료 후 total 반환",
 )
 async def generate_ai_questions(
     record_id: int,
@@ -687,67 +688,68 @@ async def generate_ai_questions(
     )
     rejected_keys = [p.pattern for p in rejected_patterns]
 
+    ai_payload = {
+        "record_data": record_data,
+        "patient_profile": patient_profile,
+        "historical_records": hist_result["historical_records"],
+        "common_question_responses": common_question_responses,
+        "rejected_keys": rejected_keys,
+    }
+
     generated = 0
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
             async with client.stream(
                 "POST",
                 f"{AI_SERVER_URL}/ai-questions/generate-stream",
-                json={
-                    "record_data": record_data,
-                    "patient_profile": patient_profile,
-                    "historical_records": hist_result["historical_records"],
-                    "common_question_responses": common_question_responses,
-                    "rejected_keys": rejected_keys,
-                },
+                json=ai_payload,
                 headers={"Content-Type": "application/json"},
             ) as resp:
-                if resp.status_code < 400:
-                    buffer = ""
-                    async for chunk in resp.aiter_text():
-                        buffer += chunk
-                        while "\n\n" in buffer:
-                            event_str, buffer = buffer.split("\n\n", 1)
-                            lines = event_str.strip().splitlines()
-                            event_type, data_line = "message", ""
-                            for line in lines:
-                                if line.startswith("event:"):
-                                    event_type = line[6:].strip()
-                                elif line.startswith("data:"):
-                                    data_line = line[5:].strip()
-                            if event_type == "done":
-                                break
-                            if data_line and event_type != "error":
+                if resp.status_code >= 400:
+                    return {"generated": 0, "total": 0}
+                buffer = ""
+                async for chunk in resp.aiter_text():
+                    buffer += chunk
+                    while "\n\n" in buffer:
+                        event_str, buffer = buffer.split("\n\n", 1)
+                        lines = event_str.strip().splitlines()
+                        event_type, data_line = "message", ""
+                        for line in lines:
+                            if line.startswith("event:"):
+                                event_type = line[6:].strip()
+                            elif line.startswith("data:"):
+                                data_line = line[5:].strip()
+                        if event_type == "done":
+                            break
+                        if data_line and event_type != "error":
+                            try:
+                                q_data = json.loads(data_line)
+                                q_type_str = q_data.get("question_type", "yes_no")
                                 try:
-                                    q_data = json.loads(data_line)
-                                    q_type_str = q_data.get("question_type", "yes_no")
-                                    try:
-                                        q_type = AIQuestionType(q_type_str)
-                                    except ValueError:
-                                        q_type = AIQuestionType.yes_no
-                                    ai_q = AIQuestion(
-                                        daily_record_id=record_id,
-                                        patient_id=current_user.id,
-                                        question_text=q_data["question_text"],
-                                        reason=q_data.get("reason"),
-                                        question_type=q_type,
-                                        options=(json.dumps(q_data["options"], ensure_ascii=False)
-                                                 if q_data.get("options") is not None else None),
-                                    )
-                                    db.add(ai_q)
-                                    db.commit()
-                                    generated += 1
-                                except Exception:
-                                    pass
+                                    q_type = AIQuestionType(q_type_str)
+                                except ValueError:
+                                    q_type = AIQuestionType.yes_no
+                                ai_q = AIQuestion(
+                                    daily_record_id=record_id,
+                                    patient_id=current_user.id,
+                                    question_text=q_data["question_text"],
+                                    reason=q_data.get("reason"),
+                                    question_type=q_type,
+                                    options=(json.dumps(q_data["options"], ensure_ascii=False)
+                                             if q_data.get("options") is not None else None),
+                                )
+                                db.add(ai_q)
+                                db.commit()
+                                generated += 1
+                            except Exception:
+                                pass
     except Exception as e:
         logger.warning(f"AI 질문 생성 실패 (record_id={record_id}): {e}")
 
-    total = (
-        db.query(AIQuestion)
-        .filter(AIQuestion.daily_record_id == record_id,
-                AIQuestion.status != AIQuestionStatus.rejected_global)
-        .count()
-    )
+    total = db.query(AIQuestion).filter(
+        AIQuestion.daily_record_id == record_id,
+        AIQuestion.status != AIQuestionStatus.rejected_global
+    ).count()
     return {"generated": generated, "total": total}
 
 
