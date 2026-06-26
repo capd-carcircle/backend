@@ -698,7 +698,7 @@ async def generate_ai_questions(
 
     generated = 0
     try:
-        async with httpx.AsyncClient(timeout=600.0) as client:
+        async with httpx.AsyncClient(timeout=1800.0) as client:
             async with client.stream(
                 "POST",
                 f"{AI_SERVER_URL}/ai-questions/generate-stream",
@@ -933,7 +933,7 @@ async def stream_ai_questions(
     async def proxy_sse():
         db_proxy = SessionLocal()
         try:
-            async with httpx.AsyncClient(timeout=600.0) as client:
+            async with httpx.AsyncClient(timeout=1800.0) as client:
                 async with client.stream(
                     "POST",
                     f"{AI_SERVER_URL}/ai-questions/generate-stream",
