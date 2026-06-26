@@ -13,7 +13,7 @@ class Settings(BaseSettings):
 
     # Google Cloud
     GOOGLE_CLOUD_PROJECT: str = ""
-    GEMINI_MODEL: str = "gemini-1.5-pro"
+    GEMINI_MODEL: str = "gemini-2.5-flash"
 
     # AI 서버 URL (로컬/Docker: http://ai:8001, GCP: Cloud Run URL)
     AI_SERVICE_URL: str = "http://ai:8001"

@@ -117,10 +117,12 @@ def _seed_dev_data():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    import os
     print("[startup] DB 테이블 생성 중...")
     Base.metadata.create_all(bind=engine)
     print("[startup] DB 테이블 생성 완료")
-    _seed_dev_data()
+    if os.environ.get("ENVIRONMENT") != "production":
+        _seed_dev_data()
     yield
 
 

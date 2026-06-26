@@ -80,7 +80,7 @@ jobs:
           region: asia-northeast3
           flags: >-
             --service-account=capd-runner@${{ secrets.GCP_PROJECT_ID }}.iam.gserviceaccount.com
-            --set-env-vars=DATABASE_URL=${{ secrets.DATABASE_URL }},SECRET_KEY=${{ secrets.SECRET_KEY }},AI_SERVICE_URL=${{ secrets.AI_SERVICE_URL }}
+            --set-env-vars=DATABASE_URL=${{ secrets.DATABASE_URL }},SECRET_KEY=${{ secrets.SECRET_KEY }},AI_SERVICE_URL=${{ secrets.AI_SERVICE_URL }},ENVIRONMENT=production
             --allow-unauthenticated
             --port=8000
             --timeout=3600
