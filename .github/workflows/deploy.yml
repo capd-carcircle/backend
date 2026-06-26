@@ -80,9 +80,7 @@ jobs:
           region: asia-northeast3
           flags: >-
             --service-account=capd-runner@${{ secrets.GCP_PROJECT_ID }}.iam.gserviceaccount.com
-            --add-cloudsql-instances=${{ secrets.GCP_PROJECT_ID }}:asia-northeast3:capd-db
-            --set-secrets=DATABASE_URL=DATABASE_URL:latest,SECRET_KEY=SECRET_KEY:latest
-            --set-env-vars=AI_SERVICE_URL=https://capd-ai-cdwaxwdxfa-du.a.run.app
+            --set-env-vars=DATABASE_URL=${{ secrets.DATABASE_URL }},SECRET_KEY=${{ secrets.SECRET_KEY }},AI_SERVICE_URL=${{ secrets.AI_SERVICE_URL }}
             --allow-unauthenticated
             --port=8000
             --timeout=3600
