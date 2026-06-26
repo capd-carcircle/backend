@@ -591,6 +591,166 @@ def submit_common_survey(
     return {"success": True, "saved_count": saved, "ai_reset": answers_changed}
 
 
+# ── AI 질문 비스트리밍 생성 (test-runner 전용) ────────────────────────
+@router.post(
+    "/{record_id}/ai-questions/generate",
+    summary="AI 질문 생성 및 저장 (비스트리밍, test-runner 전용)",
+)
+async def generate_ai_questions(
+    record_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if current_user.role != UserRole.patient:
+        raise HTTPException(status_code=403, detail="환자만 접근할 수 있습니다.")
+
+    record = db.query(DailyRecord).filter(DailyRecord.id == record_id).first()
+    if not record or record.patient_id != current_user.id:
+        raise HTTPException(status_code=404, detail="기록을 찾을 수 없습니다.")
+
+    # 이미 있으면 바로 반환
+    existing = (
+        db.query(AIQuestion)
+        .filter(AIQuestion.daily_record_id == record_id,
+                AIQuestion.status != AIQuestionStatus.rejected_global)
+        .all()
+    )
+    if existing:
+        return {"generated": 0, "total": len(existing)}
+
+    # 공통질문 답변 수집
+    from sqlalchemy import or_
+    _assigned_q_ids = (
+        db.query(QuestionPatientAssignment.question_id)
+        .filter(QuestionPatientAssignment.patient_id == current_user.id)
+        .subquery()
+    )
+    common_qs = (
+        db.query(CommonQuestion)
+        .filter(
+            CommonQuestion.is_active == True,
+            or_(CommonQuestion.target_all_patients == True,
+                CommonQuestion.id.in_(_assigned_q_ids)),
+        ).all()
+    )
+    responses = db.query(SurveyResponse).filter(SurveyResponse.daily_record_id == record_id).all()
+    resp_map = {(r.question_id, r.question_type): r for r in responses}
+    common_question_responses = []
+    for q in common_qs:
+        r = resp_map.get((q.id, "common"))
+        if r:
+            common_question_responses.append({
+                "question_text": q.question_text,
+                "answer": r.text_answer or (r.choice.value if r.choice else "미응답"),
+            })
+
+    exchanges = (
+        db.query(ExchangeRecord)
+        .filter(ExchangeRecord.daily_record_id == record_id)
+        .order_by(ExchangeRecord.session_number).all()
+    )
+    record_data = {
+        "date": str(record.record_date),
+        "weight": float(record.weight) if record.weight else None,
+        "blood_pressure": record.blood_pressure,
+        "total_ultrafiltration": float(record.total_ultrafiltration) if record.total_ultrafiltration else None,
+        "turbid_peritoneal": record.turbid_peritoneal,
+        "fasting_blood_glucose": float(record.fasting_blood_glucose) if record.fasting_blood_glucose else None,
+        "urine_count": record.urine_count,
+        "memo": record.memo,
+        "exchange_records": [
+            {
+                "session_number": ex.session_number,
+                "exchange_time": ex.exchange_time,
+                "drainage_volume": float(ex.drainage_volume) if ex.drainage_volume is not None else None,
+                "infusion_concentration": float(ex.infusion_concentration) if ex.infusion_concentration is not None else None,
+                "infusion_weight": float(ex.infusion_weight) if ex.infusion_weight is not None else None,
+                "ultrafiltration": float(ex.ultrafiltration) if ex.ultrafiltration is not None else None,
+            } for ex in exchanges
+        ],
+    }
+
+    doctor_note_row = (
+        db.query(PatientNote)
+        .filter(PatientNote.patient_id == current_user.id)
+        .order_by(PatientNote.updated_at.desc()).first()
+    )
+    patient_profile = {
+        "self_memo": current_user.self_memo,
+        "doctor_note": doctor_note_row.content if doctor_note_row else None,
+    }
+    hist_result = compute_historical_context(db, current_user.id, record_id)
+    rejected_patterns = (
+        db.query(RejectedQPattern)
+        .filter((RejectedQPattern.patient_id.is_(None)) | (RejectedQPattern.patient_id == current_user.id))
+        .all()
+    )
+    rejected_keys = [p.pattern for p in rejected_patterns]
+
+    generated = 0
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            async with client.stream(
+                "POST",
+                f"{AI_SERVER_URL}/ai-questions/generate-stream",
+                json={
+                    "record_data": record_data,
+                    "patient_profile": patient_profile,
+                    "historical_records": hist_result["historical_records"],
+                    "common_question_responses": common_question_responses,
+                    "rejected_keys": rejected_keys,
+                },
+                headers={"Content-Type": "application/json"},
+            ) as resp:
+                if resp.status_code < 400:
+                    buffer = ""
+                    async for chunk in resp.aiter_text():
+                        buffer += chunk
+                        while "\n\n" in buffer:
+                            event_str, buffer = buffer.split("\n\n", 1)
+                            lines = event_str.strip().splitlines()
+                            event_type, data_line = "message", ""
+                            for line in lines:
+                                if line.startswith("event:"):
+                                    event_type = line[6:].strip()
+                                elif line.startswith("data:"):
+                                    data_line = line[5:].strip()
+                            if event_type == "done":
+                                break
+                            if data_line and event_type != "error":
+                                try:
+                                    q_data = json.loads(data_line)
+                                    q_type_str = q_data.get("question_type", "yes_no")
+                                    try:
+                                        q_type = AIQuestionType(q_type_str)
+                                    except ValueError:
+                                        q_type = AIQuestionType.yes_no
+                                    ai_q = AIQuestion(
+                                        daily_record_id=record_id,
+                                        patient_id=current_user.id,
+                                        question_text=q_data["question_text"],
+                                        reason=q_data.get("reason"),
+                                        question_type=q_type,
+                                        options=(json.dumps(q_data["options"], ensure_ascii=False)
+                                                 if q_data.get("options") is not None else None),
+                                    )
+                                    db.add(ai_q)
+                                    db.commit()
+                                    generated += 1
+                                except Exception:
+                                    pass
+    except Exception as e:
+        logger.warning(f"AI 질문 생성 실패 (record_id={record_id}): {e}")
+
+    total = (
+        db.query(AIQuestion)
+        .filter(AIQuestion.daily_record_id == record_id,
+                AIQuestion.status != AIQuestionStatus.rejected_global)
+        .count()
+    )
+    return {"generated": generated, "total": total}
+
+
 # ── AI 질문 SSE 스트리밍 ────────────────────────────────────────────
 @router.get(
     "/{record_id}/ai-questions/stream",
