@@ -264,20 +264,26 @@ def get_record_detail(
 
     survey_out = []
 
-    # 공통 질문 (활성화된 것)
-    for q in db.query(CommonQuestion).filter(CommonQuestion.is_active == True).all():
-        r = resp_map.get((q.id, "common"))
-        # text_answer가 있고 choice가 없는 경우도 answered=True로 처리
-        answered = r is not None and (r.choice is not None or bool(r.text_answer))
-        survey_out.append({
-            "question_type":      "common",
-            "question_item_type": q.question_type.value if q.question_type else "yes_no",
-            "question_text":      q.question_text,
-            "reason":             None,
-            "choice":             r.choice.value if r and r.choice else None,
-            "text_answer":        r.text_answer if r else None,
-            "answered":           answered,
-        })
+    # 공통 질문 — 이 기록에 실제 응답이 있는 것만 표시 (당시 질문 기준)
+    common_responded_ids = {qid for (qid, qt) in resp_map if qt == "common"}
+    if common_responded_ids:
+        common_qs = (
+            db.query(CommonQuestion)
+            .filter(CommonQuestion.id.in_(common_responded_ids))
+            .all()
+        )
+        for q in common_qs:
+            r = resp_map.get((q.id, "common"))
+            answered = r is not None and (r.choice is not None or bool(r.text_answer))
+            survey_out.append({
+                "question_type":      "common",
+                "question_item_type": q.question_type.value if q.question_type else "yes_no",
+                "question_text":      q.question_text,
+                "reason":             None,
+                "choice":             r.choice.value if r and r.choice else None,
+                "text_answer":        r.text_answer if r else None,
+                "answered":           answered,
+            })
 
     # AI 질문 (이 기록용)
     for q in db.query(AIQuestion).filter(
