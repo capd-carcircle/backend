@@ -165,24 +165,14 @@ def get_my_survey_responses(
     )
     resp_map = {(r.question_id, r.question_type): r for r in responses}
 
-    from sqlalchemy import or_
-    _assigned_q_ids = (
-        db.query(QuestionPatientAssignment.question_id)
-        .filter(QuestionPatientAssignment.patient_id == current_user.id)
-        .subquery()
-    )
+    # 이 기록에 실제 응답이 있는 공통질문만 표시 (당시 질문 기준)
+    common_responded_ids = {qid for (qid, qt) in resp_map if qt == "common"}
     common_qs = (
         db.query(CommonQuestion)
-        .filter(
-            CommonQuestion.is_active == True,
-            or_(
-                CommonQuestion.target_all_patients == True,
-                CommonQuestion.id.in_(_assigned_q_ids),
-            ),
-        )
+        .filter(CommonQuestion.id.in_(common_responded_ids))
         .order_by(CommonQuestion.created_at.asc())
         .all()
-    )
+    ) if common_responded_ids else []
     common_out = []
     for q in common_qs:
         r = resp_map.get((q.id, "common"))
