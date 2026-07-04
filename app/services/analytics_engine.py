@@ -501,7 +501,9 @@ def _corr_label(r: float) -> str:
 
 def task3_attribute_correlation(historical_rows: list[dict], window: int = 30) -> dict:
     """
-    최근 window일치 Spearman 상관관계 -- |r| >= 0.5 쌍만 반환
+    최근 window일치 Spearman 상관관계 -- 계산 가능한 쌍은 전부 반환(상관계수 무관).
+    |r| >= 0.5 이상만 기본 노출할지는 호출 쪽(API 응답을 쓰는 화면)에서 결정.
+    interpretation 필드가 "weak"면 |r| < 0.5인 쌍.
     """
     rows = historical_rows[:window]
     if len(rows) < 7:
@@ -535,7 +537,7 @@ def task3_attribute_correlation(historical_rows: list[dict], window: int = 30) -
                 continue
 
             corr = _spearman(x_list, y_list)
-            if corr is None or abs(corr) < 0.5:
+            if corr is None:
                 continue
 
             direction = "positive" if corr > 0 else "negative"
