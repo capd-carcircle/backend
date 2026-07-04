@@ -10,7 +10,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import desc, or_
+from sqlalchemy import desc, or_, text
 from sqlalchemy.orm import Session
 
 from app.core.auth import get_current_user
@@ -64,6 +64,8 @@ class PatientOverview(BaseModel):
     is_current:             bool       # True = 현재 담당
     assignment_started_at:  Optional[str]
     assignment_ended_at:    Optional[str]
+    has_anomaly:            Optional[bool] = None   # 최근 분석 리포트 캐시(Gold) 기준, 계산 이력 없으면 None
+    anomaly_record_date:    Optional[str] = None     # has_anomaly 판정 기준이 된 날짜
 
 
 # ── 헬퍼 ──────────────────────────────────────────────────
@@ -208,6 +210,31 @@ def list_patients_overview(
     today = datetime.now(timezone.utc).date()
     result: List[PatientOverview] = []
 
+    # ── 이상치 배지용 캐시 조회 (Gold: patient_daily_analytics) ──────
+    # 환자별 가장 최근 계산일의 has_anomaly만 사용. 온디맨드 분석 리포트를
+    # 한 번도 연 적 없는 환자는 캐시가 없어 배지가 표시되지 않음(정상 동작 —
+    # 4.5단계 ③에서 캐시 재사용 붙으면, 추후 Airflow 배치가 전체 환자를
+    # 매일 채우면서 자연히 해소됨).
+    anomaly_patient_ids = list({a.patient_id for a in assignments} | {p.id for p in legacy_patients})
+    anomaly_cache: Dict[int, Dict[str, Any]] = {}
+    if anomaly_patient_ids:
+        try:
+            rows = db.execute(
+                text("""
+                    SELECT DISTINCT ON (patient_id) patient_id, record_date, has_anomaly
+                    FROM patient_daily_analytics
+                    WHERE patient_id = ANY(:ids)
+                    ORDER BY patient_id, record_date DESC
+                """),
+                {"ids": anomaly_patient_ids},
+            ).fetchall()
+            anomaly_cache = {
+                r.patient_id: {"has_anomaly": r.has_anomaly, "record_date": r.record_date}
+                for r in rows
+            }
+        except Exception:
+            anomaly_cache = {}   # 캐시 조회 실패해도 목록 자체는 정상 반환 (best-effort)
+
     def _make_overview(patient: User, assignment: Optional[PatientDoctorAssignment], curr: bool) -> PatientOverview:
         # 접근 가능한 기록 범위 결정
         records_q = db.query(DailyRecord).filter(DailyRecord.patient_id == patient.id)
@@ -224,6 +251,8 @@ def list_patients_overview(
 
         days_since = (today - last_rec.record_date).days if last_rec else None
 
+        cached = anomaly_cache.get(patient.id)
+
         return PatientOverview(
             id                    = patient.id,
             name                  = patient.name,
@@ -238,6 +267,8 @@ def list_patients_overview(
             is_current            = curr,
             assignment_started_at = assignment.started_at.isoformat() if assignment else None,
             assignment_ended_at   = assignment.ended_at.isoformat() if assignment and assignment.ended_at else None,
+            has_anomaly           = cached["has_anomaly"] if cached else None,
+            anomaly_record_date   = cached["record_date"].isoformat() if cached else None,
         )
 
     # assignment 기반 환자 처리 — 배치 로딩으로 N+1 방지

@@ -1,0 +1,39 @@
+# CRLF↔LF 줄바꿈 노이즈 차단 — CAPD 4개 레포 공통
+# 텍스트 파일은 저장소에 항상 LF로 정규화, 체크아웃 시 OS에 맞춤
+* text=auto eol=lf
+
+# 코드/설정: 명시적으로 LF
+*.py    text eol=lf
+*.ts    text eol=lf
+*.tsx   text eol=lf
+*.js    text eol=lf
+*.jsx   text eol=lf
+*.json  text eol=lf
+*.css   text eol=lf
+*.html  text eol=lf
+*.md    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.sql   text eol=lf
+*.sh    text eol=lf
+*.env   text eol=lf
+Dockerfile text eol=lf
+
+# Windows 전용 스크립트는 CRLF 유지
+*.ps1   text eol=crlf
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+
+# 바이너리 — 변환 금지
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.pdf   binary
+*.docx  binary
+*.pptx  binary
+*.xlsx  binary
+*.pem   binary
+*.ico   binary
+*.woff  binary
+*.woff2 binary

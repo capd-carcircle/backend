@@ -2,7 +2,7 @@ from datetime import date, datetime, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, or_
+from sqlalchemy import func, or_, text
 from sqlalchemy.orm import Session
 
 from app.core.auth import get_current_user
@@ -123,6 +123,25 @@ def get_dashboard(
 		)
 		ai_counts = {row.daily_record_id: row.cnt for row in rows}
 
+	# ── 해당 날짜 이상치 캐시 조회 (Gold: patient_daily_analytics) ────
+	# target_date와 정확히 일치하는 날짜의 has_anomaly만 사용 — "최근"이 아니라
+	# 대시보드가 보여주는 그 날짜 기준. 캐시가 없으면(리포트 미열람) None.
+	anomaly_by_patient: dict[int, bool] = {}
+	day_patient_ids = list({rec.patient_id for rec, _ in day_records})
+	if day_patient_ids:
+		try:
+			rows2 = db.execute(
+				text("""
+					SELECT patient_id, has_anomaly
+					FROM patient_daily_analytics
+					WHERE patient_id = ANY(:ids) AND record_date = :d
+				"""),
+				{"ids": day_patient_ids, "d": target_date},
+			).fetchall()
+			anomaly_by_patient = {r.patient_id: r.has_anomaly for r in rows2}
+		except Exception:
+			anomaly_by_patient = {}   # 캐시 조회 실패해도 대시보드는 정상 반환 (best-effort)
+
 	# ── 통계 계산 ─────────────────────────────────────────────
 	total_submitted = len(day_records)
 	pending_count   = sum(1 for rec, _ in day_records if rec.status == RecordStatus.submitted)
@@ -141,6 +160,7 @@ def get_dashboard(
 			unreviewed_ai_count  = ai_counts.get(rec.id, 0),
 			risk_level           = rec.risk_level.value if rec.risk_level else None,
 			ai_summary           = rec.ai_summary,
+			has_anomaly          = anomaly_by_patient.get(rec.patient_id),
 		)
 		for rec, patient in day_records
 	]
