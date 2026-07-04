@@ -107,6 +107,9 @@ _ANALYTICS_TABLES_SQL = [
         CONSTRAINT uq_patient_daily_analytics UNIQUE (patient_id, record_date)
     );
     """,
+    "CREATE INDEX IF NOT EXISTS idx_pdm_patient_date ON patient_daily_metrics (patient_id, record_date DESC);",
+    "CREATE INDEX IF NOT EXISTS idx_pda_patient_date ON patient_daily_analytics (patient_id, record_date DESC);",
+    "CREATE INDEX IF NOT EXISTS idx_pda_has_anomaly ON patient_daily_analytics (record_date) WHERE has_anomaly = TRUE;",
 ]
 
 

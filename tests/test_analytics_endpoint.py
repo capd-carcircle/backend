@@ -106,6 +106,46 @@ def test_analytics_endpoint_matches_pure_function_and_caches(
     assert res_cached.json()["source"] == "cache"
 
 
+def test_analytics_endpoint_window_switch_invalidates_cache(
+    client, db_session, assigned_patient, doctor_user, make_auth_headers,
+):
+    """
+    CLAUDE.md "알려진 제한사항" 2번 재현: patient_daily_analytics는 (patient_id,
+    record_date)당 1행만 저장하고 그 안에 마지막으로 계산된 window 하나만 들어있어서,
+    7<->30<->90 전환할 때마다 서로의 캐시를 무효화시키고 매번 재계산됨(의도된 동작,
+    버그 아님). 같은 window를 다시 요청할 때만 캐시 적중.
+    """
+    n_days = 35  # window=7/30 둘 다 실제로 다른 historical 개수를 쓰게 충분히 확보
+    series = gen_synthetic_series(seed=11, n_days=n_days, start=START)
+    for i, (daily_data, exchanges) in enumerate(series):
+        _insert_submitted_record(
+            db_session, assigned_patient.id, START + timedelta(days=i), daily_data, exchanges
+        )
+
+    headers = make_auth_headers(doctor_user)
+    url = f"/api/v1/analytics/patients/{assigned_patient.id}"
+
+    res7 = client.get(f"{url}?window=7", headers=headers)
+    assert res7.status_code == 200
+    assert res7.json()["source"] == "on_demand"
+    assert res7.json()["window_days"] == 7
+
+    # window을 30으로 바꾸면 캐시에 저장된 window_days(7)와 달라 재계산됨
+    res30 = client.get(f"{url}?window=30", headers=headers)
+    assert res30.status_code == 200
+    assert res30.json()["source"] == "on_demand"
+    assert res30.json()["window_days"] == 30
+
+    # 같은 window(30)로 재호출 -> 이번엔 캐시 적중
+    res30_again = client.get(f"{url}?window=30", headers=headers)
+    assert res30_again.json()["source"] == "cache"
+
+    # 다시 7로 돌아가면 캐시(30)와 또 달라 재계산 -- 알려진 제한사항 재현
+    res7_again = client.get(f"{url}?window=7", headers=headers)
+    assert res7_again.json()["source"] == "on_demand"
+    assert res7_again.json()["window_days"] == 7
+
+
 def test_analytics_endpoint_403_for_unassigned_doctor(
     client, patient_user, doctor_user, make_auth_headers,
 ):
