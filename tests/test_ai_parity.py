@@ -10,34 +10,49 @@ CI: backend 레포만 체크아웃되므로 ai 레포가 없음 -> deploy.yml에
     ./ai-repo 로 추가 체크아웃하고 AI_REPO_PATH=./ai-repo 환경변수로 지정한다.
     (ai 레포를 찾지 못하면 이 파일 전체를 skip 처리 — 로컬에서 ai/를 안 받아놓은
     경우에도 다른 테스트가 막히지 않도록.)
+
+⚠️ ai 레포 루트를 sys.path에 넣지 않는다 -- ai/ 레포에도 최상위 main.py(AI 서버용
+FastAPI 앱)가 있어서, sys.path에 올리면 이후 backend/main.py를 `from main import app`로
+가져올 때 이름이 겹쳐 ai 레포의 main.py가 먼저 잡히는 사고가 남(conftest.py의
+test_client fixture가 엉뚱한 main을 import하며 실패). 그래서 ai/tools/*.py 두 파일만
+importlib.util로 파일 경로 기준 직접 로드하고, sys.path는 전혀 건드리지 않는다.
 """
-import importlib
+import importlib.util
 import json
 import os
-import sys
 
 import pytest
 
 from synth import gen_synthetic_series
 
+
+def _load_module_from_path(module_name: str, file_path: str):
+    spec = importlib.util.spec_from_file_location(module_name, file_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _DEFAULT_AI_PATH = os.path.abspath(os.path.join(_THIS_DIR, "..", "..", "ai"))
 AI_REPO_PATH = os.path.abspath(os.environ.get("AI_REPO_PATH", _DEFAULT_AI_PATH))
+_AI_TOOLS_DIR = os.path.join(AI_REPO_PATH, "tools")
 
-if not os.path.isdir(os.path.join(AI_REPO_PATH, "tools")):
+if not os.path.isdir(_AI_TOOLS_DIR):
     pytest.skip(
         f"ai 레포를 찾을 수 없음: {AI_REPO_PATH} "
         "(AI_REPO_PATH 환경변수로 ai 레포 루트 경로를 지정할 것)",
         allow_module_level=True,
     )
 
-if AI_REPO_PATH not in sys.path:
-    sys.path.insert(0, AI_REPO_PATH)
+ai_data_engineering = _load_module_from_path(
+    "capd_ai_tools_data_engineering", os.path.join(_AI_TOOLS_DIR, "data_engineering.py")
+)
+ai_analytics = _load_module_from_path(
+    "capd_ai_tools_analytics", os.path.join(_AI_TOOLS_DIR, "analytics.py")
+)
 
-ai_data_engineering = importlib.import_module("tools.data_engineering")
-ai_analytics = importlib.import_module("tools.analytics")
-
-from app.services import analytics_engine as backend_engine  # noqa: E402  (sys.path 조작 이후 import)
+from app.services import analytics_engine as backend_engine
 
 
 @pytest.fixture(scope="module")
