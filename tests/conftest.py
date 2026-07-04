@@ -111,20 +111,22 @@ _ANALYTICS_TABLES_SQL = [
 
 
 @pytest.fixture(scope="session")
-def _schema_ready():
-    """pgvector 확장 + analytics 캐시 테이블(raw SQL) 준비. Postgres 연결 안 되면 skip."""
+def _pgvector_ready():
+    """
+    pgvector 확장만 미리 생성. Base.metadata.create_all()이 document_chunks
+    (Vector 컬럼)를 만들 때 필요 -- 반드시 create_all보다 먼저 실행돼야 함.
+    Postgres 연결 안 되면 skip.
+    """
     try:
         with _engine.connect() as conn:
             conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-            for stmt in _ANALYTICS_TABLES_SQL:
-                conn.execute(text(stmt))
             conn.commit()
     except OperationalError as e:
         pytest.skip(f"테스트 Postgres에 연결할 수 없음 ({TEST_DATABASE_URL}): {e}")
 
 
 @pytest.fixture(scope="session")
-def test_client(_schema_ready):
+def test_client(_pgvector_ready):
     """
     세션당 1회만 FastAPI lifespan 실행(Base.metadata.create_all + 개발 시드).
     이후 각 테스트는 dependency override로 격리된 db_session을 주입받는다.
@@ -135,8 +137,21 @@ def test_client(_schema_ready):
         yield c
 
 
+@pytest.fixture(scope="session")
+def _analytics_tables_ready(test_client):
+    """
+    patient_daily_metrics/patient_daily_analytics(raw SQL, FK -> users.id) 생성.
+    ⚠️ test_client 다음에 실행돼야 함 -- Base.metadata.create_all()이 먼저 users
+    테이블을 만들어야 이 FK 참조가 성립함(반대 순서면 UndefinedTable 에러).
+    """
+    with _engine.connect() as conn:
+        for stmt in _ANALYTICS_TABLES_SQL:
+            conn.execute(text(stmt))
+        conn.commit()
+
+
 @pytest.fixture()
-def db_session(test_client):
+def db_session(_analytics_tables_ready):
     """테스트 1개당 트랜잭션+SAVEPOINT로 격리된 세션. 끝나면 전부 롤백."""
     connection = _engine.connect()
     outer_trans = connection.begin()
