@@ -10,6 +10,11 @@ ai/ 서버 호출 없음 — backend 단독 즉석 계산(speed layer).
 이 두 테이블은 나중에 capd-pipeline(Airflow) 배치가 전체 환자에 대해 매일
 채워 넣는 대상 테이블이기도 하다 (9-1 참고).
 
+4.5단계 ③: 같은 (patient_id, record_date) Gold 캐시가 이미 있으면 재계산 없이
+그대로 반환(_read_cache). 신선도 체크 없음 — submitted/reviewed 기록의 수치는
+draft 상태에서만 수정 가능하므로(records.py update_record) 한 번 이 캐시에
+들어온 값은 절대 바뀌지 않는다. 응답의 "source" 필드로 cache/on_demand 구분.
+
 접근 권한 로직은 patients.py의 담당 이력(patient_doctor_assignments) 규칙을 재사용.
 """
 import json
@@ -174,6 +179,38 @@ def _upsert_cache(db: Session, patient_id: int, record_date, today_row: Dict[str
         db.rollback()
 
 
+# ── Gold 캐시 조회 (4.5단계 ③) ──────────────────────────────────
+
+def _read_cache(db: Session, patient_id: int, record_date) -> Optional[Dict[str, Any]]:
+    """
+    patient_daily_analytics(Gold)에 (patient_id, record_date) 캐시가 있으면 반환.
+
+    캐시 신선도 체크 없이 존재 여부만 확인 — submitted/reviewed 상태로 들어온 기록의
+    수치(체중/혈압/UF 등)는 approve/revert(상태만 변경)로도 절대 바뀌지 않으므로
+    (수정은 draft 상태에서만 가능, records.py update_record 참고),
+    같은 record_date의 캐시는 다시 계산해도 항상 동일한 값이 나옴.
+    """
+    row = db.execute(
+        text("""
+            SELECT trend_json, anomaly_json, correlation_json, eda_json,
+                   has_anomaly, anomaly_attrs
+            FROM patient_daily_analytics
+            WHERE patient_id = :patient_id AND record_date = :record_date
+        """),
+        {"patient_id": patient_id, "record_date": record_date},
+    ).first()
+    if row is None:
+        return None
+    return {
+        "trend_analysis":        row.trend_json,
+        "anomaly_detection":     row.anomaly_json,
+        "attribute_correlation": row.correlation_json,
+        "eda":                   row.eda_json,
+        "has_anomaly":           row.has_anomaly,
+        "anomaly_attrs":         row.anomaly_attrs,
+    }
+
+
 # ── 추세 카드 미니차트용 일별 시계열 (4.5단계 ①) ──────────────────
 
 def _build_daily_series(
@@ -249,9 +286,14 @@ def get_patient_analytics(
         for r in historical_records
     ]
 
-    result = run_all_tasks(today_row, historical_rows)
-
-    _upsert_cache(db, patient_id, today_record.record_date, today_row, result)
+    cached = _read_cache(db, patient_id, today_record.record_date)
+    if cached is not None:
+        result = cached
+        source = "cache"
+    else:
+        result = run_all_tasks(today_row, historical_rows)
+        _upsert_cache(db, patient_id, today_record.record_date, today_row, result)
+        source = "on_demand"
 
     daily_series = _build_daily_series(today_row, historical_rows)
 
@@ -260,7 +302,7 @@ def get_patient_analytics(
         "patient_name": patient.name,
         "record_date":  today_record.record_date.isoformat(),
         "window_days":  len(historical_rows),
-        "source":       "on_demand",
+        "source":       source,
         "daily_series": daily_series,
         **result,
     }
