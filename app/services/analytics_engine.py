@@ -1,14 +1,13 @@
 """
-analytics_engine.py — 온디맨드 분석 엔진 (AB180 전환설계 9-4 3단계)
+analytics_engine.py — 온디맨드 분석 엔진
 
 ai/tools/data_engineering.py + ai/tools/analytics.py를 backend로 그대로 포팅한 것.
 순수 Python(외부 라이브러리 의존 없음) — ai/ 서버를 거치지 않고 backend가 단독으로
 즉석 계산(speed layer)할 수 있도록 하기 위함.
 
 ⚠️ 주의: ai/tools/data_engineering.py · ai/tools/analytics.py 원본과 로직을 반드시
-동일하게 유지할 것. 두 서버가 같은 입력에 다른 결과를 내면 안 됨 (추후 P4 정합성
-하네스가 이 동일성을 자동 검증할 예정 — capd-analytics(Kotlin) 이관 시 3자 비교).
-원본 수정 시 이 파일도 함께 수정.
+동일하게 유지할 것. 두 서버가 같은 입력에 다른 결과를 내면 안 됨(추후 자동 정합성
+테스트로 검증 예정). 원본 수정 시 이 파일도 함께 수정.
 
 원본: ai/tools/data_engineering.py, ai/tools/analytics.py
 """
@@ -593,13 +592,16 @@ def task4_eda(today_row: dict, historical_rows: list[dict]) -> dict:
     return {"task": "exploratory_data_analysis", "results": results}
 
 
-def run_all_tasks(today_row: dict, historical_rows: list[dict]) -> dict:
+def run_all_tasks(today_row: dict, historical_rows: list[dict], window: int = 30) -> dict:
     """
     4가지 분석 Task 모두 실행
 
     Args:
         today_row:       build_daily_model_row()로 생성한 오늘 Daily Model Row
         historical_rows: 최신->과거 순 Daily Model Row 리스트 (오늘 제외)
+        window:          task3(상관관계)에 쓸 최근 며칠치 기준(기본 30일).
+                         task1/2/4는 "오늘 vs 7일/30일 평균"이라는 고정된 통계 정의라
+                         window와 무관하게 항상 7일·30일 기준 그대로 계산함(의도된 동작).
 
     Returns:
         {
@@ -613,7 +615,7 @@ def run_all_tasks(today_row: dict, historical_rows: list[dict]) -> dict:
     """
     trend   = task1_trend_analysis(today_row, historical_rows)
     anomaly = task2_anomaly_detection(today_row, historical_rows)
-    corr    = task3_attribute_correlation(historical_rows)
+    corr    = task3_attribute_correlation(historical_rows, window=window)
     eda     = task4_eda(today_row, historical_rows)
 
     anomaly_attrs = [

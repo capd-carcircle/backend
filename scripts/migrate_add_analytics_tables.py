@@ -1,7 +1,7 @@
 """
 migrate_add_analytics_tables.py
 ================================
-AB180 전환설계(AB180_전환설계.md 9-1) — 분석 리포트용 집계 테이블 2종 신설
+분석 리포트용 집계 테이블 2종 신설
 
 Silver: patient_daily_metrics   — ai/tools/data_engineering.py build_daily_model_row() 출력 적재본
 Gold:   patient_daily_analytics — ai/tools/analytics.py run_all_tasks() 출력 적재본

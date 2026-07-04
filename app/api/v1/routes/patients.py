@@ -213,8 +213,7 @@ def list_patients_overview(
     # ── 이상치 배지용 캐시 조회 (Gold: patient_daily_analytics) ──────
     # 환자별 가장 최근 계산일의 has_anomaly만 사용. 온디맨드 분석 리포트를
     # 한 번도 연 적 없는 환자는 캐시가 없어 배지가 표시되지 않음(정상 동작 —
-    # 4.5단계 ③에서 캐시 재사용 붙으면, 추후 Airflow 배치가 전체 환자를
-    # 매일 채우면서 자연히 해소됨).
+    # 추후 Airflow 배치가 전체 환자를 매일 채우면서 자연히 해소됨).
     anomaly_patient_ids = list({a.patient_id for a in assignments} | {p.id for p in legacy_patients})
     anomaly_cache: Dict[int, Dict[str, Any]] = {}
     if anomaly_patient_ids:

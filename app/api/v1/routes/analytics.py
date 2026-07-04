@@ -1,19 +1,22 @@
 """
-analytics.py — 온디맨드 분석 리포트 API (AB180 전환설계 9-2/9-4, 3단계)
+analytics.py — 온디맨드 분석 리포트 API
 
-의사가 "분석 리포트" 화면을 열면(추후 4단계 frontend) 배포된 backend가
-즉석으로 app/services/analytics_engine.py(ai/tools 포팅본)를 돌려 결과를 반환한다.
+의사가 "분석 리포트" 화면을 열면 배포된 backend가 즉석으로
+app/services/analytics_engine.py(ai/tools 포팅본)를 돌려 결과를 반환한다.
 ai/ 서버 호출 없음 — backend 단독 즉석 계산(speed layer).
 
 계산 결과는 Silver(patient_daily_metrics)/Gold(patient_daily_analytics) 캐시
 테이블에 upsert 해 둔다. 캐시 upsert 실패는 응답에 영향을 주지 않음(best-effort) —
-이 두 테이블은 나중에 capd-pipeline(Airflow) 배치가 전체 환자에 대해 매일
-채워 넣는 대상 테이블이기도 하다 (9-1 참고).
+이 두 테이블은 나중에 Airflow 배치가 전체 환자에 대해 매일 채워 넣는 대상
+테이블이기도 하다.
 
-4.5단계 ③: 같은 (patient_id, record_date) Gold 캐시가 이미 있으면 재계산 없이
-그대로 반환(_read_cache). 신선도 체크 없음 — submitted/reviewed 기록의 수치는
-draft 상태에서만 수정 가능하므로(records.py update_record) 한 번 이 캐시에
-들어온 값은 절대 바뀌지 않는다. 응답의 "source" 필드로 cache/on_demand 구분.
+같은 (patient_id, record_date)에 이미 계산된 Gold 캐시가 있으면 재계산 없이
+그대로 반환한다(_read_cache). 기록 값 자체의 신선도 체크는 필요 없음 —
+submitted/reviewed 기록의 수치는 draft 상태에서만 수정 가능하므로
+(records.py update_record) 한 번 이 캐시에 들어온 값은 절대 바뀌지 않는다.
+다만 요청된 window(7/30/90일)에 따라 실제로 쓰인 과거 기록 개수가 다를 수 있어,
+그 개수가 캐시 계산 당시와 다르면 재계산한다(_read_cache의 window_days 비교 참고).
+응답의 "source" 필드로 cache/on_demand 구분.
 
 접근 권한 로직은 patients.py의 담당 이력(patient_doctor_assignments) 규칙을 재사용.
 """
@@ -179,16 +182,23 @@ def _upsert_cache(db: Session, patient_id: int, record_date, today_row: Dict[str
         db.rollback()
 
 
-# ── Gold 캐시 조회 (4.5단계 ③) ──────────────────────────────────
+# ── Gold 캐시 조회 ────────────────────────────────────────────
 
-def _read_cache(db: Session, patient_id: int, record_date) -> Optional[Dict[str, Any]]:
+def _read_cache(
+    db: Session, patient_id: int, record_date, expected_historical_count: int
+) -> Optional[Dict[str, Any]]:
     """
     patient_daily_analytics(Gold)에 (patient_id, record_date) 캐시가 있으면 반환.
 
-    캐시 신선도 체크 없이 존재 여부만 확인 — submitted/reviewed 상태로 들어온 기록의
+    기록 값 자체는 신선도 체크가 필요 없음 — submitted/reviewed 상태로 들어온 기록의
     수치(체중/혈압/UF 등)는 approve/revert(상태만 변경)로도 절대 바뀌지 않으므로
-    (수정은 draft 상태에서만 가능, records.py update_record 참고),
-    같은 record_date의 캐시는 다시 계산해도 항상 동일한 값이 나옴.
+    (수정은 draft 상태에서만 가능, records.py update_record 참고).
+
+    다만 요청받은 window(7/30/90일 선택)에 따라 실제로 사용되는 과거 기록 개수
+    (historical_rows 길이)가 달라질 수 있고, task3(상관관계)는 이제 그 개수를
+    그대로 사용하므로(run_all_tasks의 window 인자) 캐시 계산 당시 쓰인 개수와
+    지금 요청의 개수가 다르면 재계산해야 함. correlation_json.window_days에
+    이미 그 개수가 저장돼 있으므로 그것과 비교.
     """
     row = db.execute(
         text("""
@@ -201,6 +211,9 @@ def _read_cache(db: Session, patient_id: int, record_date) -> Optional[Dict[str,
     ).first()
     if row is None:
         return None
+    cached_count = (row.correlation_json or {}).get("window_days")
+    if cached_count != expected_historical_count:
+        return None  # 다른 window로 계산된 캐시 — 재계산 필요
     return {
         "trend_analysis":        row.trend_json,
         "anomaly_detection":     row.anomaly_json,
@@ -211,7 +224,7 @@ def _read_cache(db: Session, patient_id: int, record_date) -> Optional[Dict[str,
     }
 
 
-# ── 추세 카드 미니차트용 일별 시계열 (4.5단계 ①) ──────────────────
+# ── 추세 카드 미니차트용 일별 시계열 ──────────────────────────────
 
 def _build_daily_series(
     today_row: Dict[str, Any], historical_rows: List[Dict[str, Any]]
@@ -286,12 +299,12 @@ def get_patient_analytics(
         for r in historical_records
     ]
 
-    cached = _read_cache(db, patient_id, today_record.record_date)
+    cached = _read_cache(db, patient_id, today_record.record_date, len(historical_rows))
     if cached is not None:
         result = cached
         source = "cache"
     else:
-        result = run_all_tasks(today_row, historical_rows)
+        result = run_all_tasks(today_row, historical_rows, window=window)
         _upsert_cache(db, patient_id, today_record.record_date, today_row, result)
         source = "on_demand"
 
