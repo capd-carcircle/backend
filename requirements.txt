@@ -27,3 +27,6 @@ httpx>=0.27.0
 
 # pgvector (DocumentChunk 모델 타입 참조용)
 pgvector>=0.3.0
+
+# 테스트 (pytest + 정합성 하네스, CI에서만 실행)
+pytest>=8.0.0

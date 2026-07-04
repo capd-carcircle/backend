@@ -10,8 +10,32 @@ jobs:
     name: CI — Install & Check
     runs-on: ubuntu-latest
 
+    services:
+      db:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: capd_test
+          POSTGRES_USER: capd_user
+          POSTGRES_PASSWORD: capd_pass
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U capd_user -d capd_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     steps:
       - uses: actions/checkout@v4
+
+      # ai 레포도 체크아웃 — tests/test_ai_parity.py가 ai/tools vs
+      # app/services/analytics_engine.py 출력을 비교하는 정합성 하네스라서 필요.
+      # 퍼블릭 레포라 별도 토큰 불필요.
+      - name: Checkout ai repo (for parity tests)
+        uses: actions/checkout@v4
+        with:
+          repository: capd-carcircle/ai
+          path: ai-repo
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
@@ -24,6 +48,12 @@ jobs:
 
       - name: Syntax check (main entry point)
         run: python -m py_compile main.py
+
+      - name: Run pytest
+        env:
+          TEST_DATABASE_URL: postgresql://capd_user:capd_pass@localhost:5432/capd_test
+          AI_REPO_PATH: ${{ github.workspace }}/ai-repo
+        run: pytest tests -v
 
   # ── 2단계: Docker 이미지 빌드 & Artifact Registry 푸시 ──────
   build-and-push:
