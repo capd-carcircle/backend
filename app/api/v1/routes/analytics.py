@@ -24,7 +24,7 @@ from app.core.auth import get_current_user
 from app.core.database import get_db
 from app.models.record import DailyRecord, RecordStatus
 from app.models.user import User, UserRole
-from app.services.analytics_engine import build_daily_model_row, run_all_tasks
+from app.services.analytics_engine import TREND_ATTRS, build_daily_model_row, run_all_tasks
 
 router = APIRouter(prefix="/analytics", tags=["분석 리포트"])
 
@@ -174,6 +174,31 @@ def _upsert_cache(db: Session, patient_id: int, record_date, today_row: Dict[str
         db.rollback()
 
 
+# ── 추세 카드 미니차트용 일별 시계열 (4.5단계 ①) ──────────────────
+
+def _build_daily_series(
+    today_row: Dict[str, Any], historical_rows: List[Dict[str, Any]]
+) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    TREND_ATTRS 각각에 대해 {date, value} 점들을 날짜 오름차순으로 반환.
+    프론트 추세 카드의 미니 차트(최근 N일 추이) 렌더링용.
+    오늘 값도 포함(가장 마지막 점) — 이상치 마커는 프론트에서
+    anomaly_detection.results[attr].is_anomaly 로 오늘 점만 표시.
+    """
+    all_rows = [today_row] + historical_rows
+    series: Dict[str, List[Dict[str, Any]]] = {}
+    for attr in TREND_ATTRS:
+        pts = [
+            {"date": r.get("date"), "value": r.get(attr)}
+            for r in all_rows
+            if r.get(attr) is not None and r.get("date")
+        ]
+        pts.sort(key=lambda p: p["date"])
+        if len(pts) >= 2:
+            series[attr] = pts
+    return series
+
+
 # ── 엔드포인트 ────────────────────────────────────────────────
 
 @router.get(
@@ -228,11 +253,14 @@ def get_patient_analytics(
 
     _upsert_cache(db, patient_id, today_record.record_date, today_row, result)
 
+    daily_series = _build_daily_series(today_row, historical_rows)
+
     return {
         "patient_id":   patient_id,
         "patient_name": patient.name,
         "record_date":  today_record.record_date.isoformat(),
         "window_days":  len(historical_rows),
         "source":       "on_demand",
+        "daily_series": daily_series,
         **result,
     }
