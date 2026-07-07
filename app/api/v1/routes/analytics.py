@@ -68,7 +68,7 @@ def _record_to_exchanges(r: DailyRecord) -> List[Dict[str, Any]]:
 
 # ── Silver/Gold 캐시 upsert (best-effort) ────────────────────────
 
-def _upsert_cache(db: Session, patient_id: int, record_date, today_row: Dict[str, Any], result: Dict[str, Any]) -> None:
+def _upsert_cache(db: Session, patient_id: int, record_date, window_days: int, today_row: Dict[str, Any], result: Dict[str, Any]) -> None:
     try:
         db.execute(
             text("""
@@ -147,16 +147,16 @@ def _upsert_cache(db: Session, patient_id: int, record_date, today_row: Dict[str
         db.execute(
             text("""
                 INSERT INTO patient_daily_analytics (
-                    patient_id, record_date,
+                    patient_id, record_date, window_days,
                     trend_json, anomaly_json, correlation_json, eda_json,
                     has_anomaly, anomaly_attrs, computed_at
                 ) VALUES (
-                    :patient_id, :record_date,
+                    :patient_id, :record_date, :window_days,
                     CAST(:trend_json AS JSONB), CAST(:anomaly_json AS JSONB),
                     CAST(:correlation_json AS JSONB), CAST(:eda_json AS JSONB),
                     :has_anomaly, :anomaly_attrs, NOW()
                 )
-                ON CONFLICT (patient_id, record_date) DO UPDATE SET
+                ON CONFLICT (patient_id, record_date, window_days) DO UPDATE SET
                     trend_json       = EXCLUDED.trend_json,
                     anomaly_json     = EXCLUDED.anomaly_json,
                     correlation_json = EXCLUDED.correlation_json,
@@ -168,6 +168,7 @@ def _upsert_cache(db: Session, patient_id: int, record_date, today_row: Dict[str
             {
                 "patient_id": patient_id,
                 "record_date": record_date,
+                "window_days": window_days,
                 "trend_json": json.dumps(result.get("trend_analysis"), ensure_ascii=False),
                 "anomaly_json": json.dumps(result.get("anomaly_detection"), ensure_ascii=False),
                 "correlation_json": json.dumps(result.get("attribute_correlation"), ensure_ascii=False),
@@ -185,20 +186,21 @@ def _upsert_cache(db: Session, patient_id: int, record_date, today_row: Dict[str
 # ── Gold 캐시 조회 ────────────────────────────────────────────
 
 def _read_cache(
-    db: Session, patient_id: int, record_date, expected_historical_count: int
+    db: Session, patient_id: int, record_date, window_days: int
 ) -> Optional[Dict[str, Any]]:
     """
-    patient_daily_analytics(Gold)에 (patient_id, record_date) 캐시가 있으면 반환.
+    patient_daily_analytics(Gold)에 (patient_id, record_date, window_days) 캐시가
+    있으면 반환.
 
     기록 값 자체는 신선도 체크가 필요 없음 — submitted/reviewed 상태로 들어온 기록의
     수치(체중/혈압/UF 등)는 approve/revert(상태만 변경)로도 절대 바뀌지 않으므로
     (수정은 draft 상태에서만 가능, records.py update_record 참고).
 
-    다만 요청받은 window(7/30/90일 선택)에 따라 실제로 사용되는 과거 기록 개수
-    (historical_rows 길이)가 달라질 수 있고, task3(상관관계)는 이제 그 개수를
-    그대로 사용하므로(run_all_tasks의 window 인자) 캐시 계산 당시 쓰인 개수와
-    지금 요청의 개수가 다르면 재계산해야 함. correlation_json.window_days에
-    이미 그 개수가 저장돼 있으므로 그것과 비교.
+    window_days는 요청받은 window(7/30/90일 선택)에 따라 실제로 사용된 과거 기록
+    개수(historical_rows 길이) — 캐시 키에 포함시켜서 7/30/90 전환할 때 서로 다른
+    행에 저장되므로 무효화 없이 각자 캐시를 유지한다(예전엔 (patient_id, record_date)
+    딱 1행뿐이라 window를 바꿀 때마다 직전 캐시를 밀어내던 문제, CLAUDE.md "알려진
+    제한사항" 참고 — backend/scripts/migrate_analytics_cache_window.py로 스키마 변경).
     """
     row = db.execute(
         text("""
@@ -206,14 +208,12 @@ def _read_cache(
                    has_anomaly, anomaly_attrs
             FROM patient_daily_analytics
             WHERE patient_id = :patient_id AND record_date = :record_date
+              AND window_days = :window_days
         """),
-        {"patient_id": patient_id, "record_date": record_date},
+        {"patient_id": patient_id, "record_date": record_date, "window_days": window_days},
     ).first()
     if row is None:
         return None
-    cached_count = (row.correlation_json or {}).get("window_days")
-    if cached_count != expected_historical_count:
-        return None  # 다른 window로 계산된 캐시 — 재계산 필요
     return {
         "trend_analysis":        row.trend_json,
         "anomaly_detection":     row.anomaly_json,
@@ -305,7 +305,7 @@ def get_patient_analytics(
         source = "cache"
     else:
         result = run_all_tasks(today_row, historical_rows, window=window)
-        _upsert_cache(db, patient_id, today_record.record_date, today_row, result)
+        _upsert_cache(db, patient_id, today_record.record_date, len(historical_rows), today_row, result)
         source = "on_demand"
 
     daily_series = _build_daily_series(today_row, historical_rows)
