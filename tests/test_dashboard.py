@@ -1,16 +1,18 @@
 """
 GET /api/v1/dashboard 의 has_anomaly 배지 통합테스트.
 
-patients/overview와 달리 대시보드는 "특정 날짜(record_date) 화면"이라, 과거
-날짜를 조회할 때는 patient_daily_analytics의 "가장 최근" 캐시가 아니라 조회
-중인 그 날짜(record_date)와 정확히 일치하는 캐시만 반영해야 함(routes/dashboard.py
-캐시 조회 참고). 이 차이를 명시적으로 검증한다.
+이상치는 "그 날짜의 기록이 어땠는가"가 아니라 "이 환자가 지금 이상 소견이
+있는가"를 나타내는 현재-상태 개념으로 정리함(2026-07-08). 그래서:
+- 실제 달력 기준 "오늘"을 조회할 때만 patients/overview와 동일하게 환자별
+  "가장 최근" Gold 캐시를 반영(record_date가 오늘과 달라도 상관없음 — 오늘
+  새 기록을 안 낸 환자도 마지막으로 알려진 이상치 상태를 그대로 보여줌).
+- 과거 날짜를 캘린더로 조회할 때는 캐시가 있든 없든 항상 None(배지 없음) —
+  과거 기록 열람 화면에 "현재" 상태를 갖다 붙이면 그 날짜에 문제가 있었다는
+  것처럼 오인될 수 있어서 아예 조회하지 않음.
 
-단, 실제 달력 기준 "오늘"을 조회할 때는 예외 — Airflow가 계산하는 캐시의
-record_date는 그 환자의 마지막 제출/승인 기록 기준이라, 오늘 새 기록을 안 낸
-환자는 캐시 날짜가 실제 오늘과 달라 정확 일치로는 배지가 못 뜨는 문제가 있었음
-(2026-07-07 수정). 그래서 target_date == date.today()일 때만 patients/overview와
-동일하게 "가장 최근" 캐시를 사용하도록 완화함 — 이것도 별도 테스트로 검증.
+(참고: 2026-07-07엔 과거 날짜도 "정확히 그 날짜와 일치하는 캐시"만 반영하는
+절충안이었으나, 하루만 지나도 어제 화면에서 배지가 사라지는 혼란만 있고
+실익이 없어 2026-07-08에 "과거 날짜는 항상 None"으로 단순화함.)
 """
 from datetime import date
 
@@ -57,30 +59,16 @@ def test_dashboard_has_anomaly_none_without_cache(
     assert row["has_anomaly"] is None
 
 
-def test_dashboard_has_anomaly_reflects_exact_date_cache(
-    client, db_session, assigned_patient, doctor_user, make_auth_headers,
-):
-    _insert_record(db_session, assigned_patient.id, TARGET_DATE)
-    _insert_gold_cache(db_session, assigned_patient.id, TARGET_DATE, has_anomaly=True)
-
-    res = client.get(
-        f"/api/v1/dashboard?record_date={TARGET_DATE.isoformat()}",
-        headers=make_auth_headers(doctor_user),
-    )
-    assert res.status_code == 200
-    row = next(r for r in res.json()["records"] if r["patient_id"] == assigned_patient.id)
-    assert row["has_anomaly"] is True
-
-
-def test_dashboard_ignores_cache_from_a_different_date(
+def test_dashboard_past_date_never_shows_anomaly_badge(
     client, db_session, assigned_patient, doctor_user, make_auth_headers,
 ):
     """
-    patients/overview는 "가장 최근" 캐시를 쓰지만 dashboard는 조회 중인 날짜와
-    정확히 일치하는 캐시만 씀 -- 다른 날짜의 캐시는 무시돼야 함.
+    과거 날짜 조회는 이상치가 "현재 상태" 개념이라 애초에 캐시를 조회하지 않음 —
+    그 날짜와 정확히 일치하는 캐시가 있든, 다른 날짜의 캐시만 있든 항상 None.
     """
     other_date = date(2026, 6, 5)
     _insert_record(db_session, assigned_patient.id, TARGET_DATE)
+    _insert_gold_cache(db_session, assigned_patient.id, TARGET_DATE, has_anomaly=True)
     _insert_gold_cache(db_session, assigned_patient.id, other_date, has_anomaly=True)
 
     res = client.get(

@@ -123,37 +123,28 @@ def get_dashboard(
 		)
 		ai_counts = {row.daily_record_id: row.cnt for row in rows}
 
-	# ── 해당 날짜 이상치 캐시 조회 (Gold: patient_daily_analytics) ────
-	# "오늘"(실제 달력 기준 today)을 보는 중이면 patients/overview와 동일하게
-	# 환자별 "가장 최근" 캐시를 사용 — Airflow가 매일 계산하는 today_row는 그
-	# 환자의 마지막 제출/승인 기록 기준이라, 오늘 실제로 새 기록을 안 낸 환자는
-	# record_date가 실제 오늘과 달라서 정확 일치 조건으로는 배지가 못 뜨던 문제
-	# 수정(2026-07-07, 차원 확인). 과거 날짜를 캘린더로 조회할 때는 그 날짜에
-	# 실제로 계산된 값만 보여줘야 맞으므로(나중에 계산된 최신값이 과거 날짜에
-	# 잘못 섞여 보이면 안 됨) 기존처럼 정확 일치 유지.
+	# ── 이상치 캐시 조회 (Gold: patient_daily_analytics) ────────
+	# 이상치는 "그 날짜의 기록이 어땠는가"가 아니라 "이 환자가 지금 이상 소견이
+	# 있는가"를 나타내는 현재-상태 개념으로 정리(2026-07-08, 차원 확인 — 날짜별로
+	# 다르게 보여줄 실익이 없고, 오히려 "정확히 그 날짜 캐시만 인정" 조건 때문에
+	# 하루만 지나도 어제 화면에서 배지가 사라지는 혼란만 있었음). 그래서 실제
+	# 달력 기준 "오늘"을 보는 중일 때만 patients/overview와 동일하게 환자별
+	# "가장 최근" 캐시를 조회해서 보여주고, 과거 날짜를 캘린더로 조회할 때는
+	# 애초에 조회하지 않고 항상 None(배지 없음) — 과거 기록 열람 화면에 "현재"
+	# 상태를 갖다 붙이면 오히려 그 날짜에 문제가 있었다는 것처럼 오인될 수 있음.
 	anomaly_by_patient: dict[int, bool] = {}
 	day_patient_ids = list({rec.patient_id for rec, _ in day_records})
-	if day_patient_ids:
+	if day_patient_ids and target_date == date.today():
 		try:
-			if target_date == date.today():
-				rows2 = db.execute(
-					text("""
-						SELECT DISTINCT ON (patient_id) patient_id, has_anomaly
-						FROM patient_daily_analytics
-						WHERE patient_id = ANY(:ids)
-						ORDER BY patient_id, record_date DESC
-					"""),
-					{"ids": day_patient_ids},
-				).fetchall()
-			else:
-				rows2 = db.execute(
-					text("""
-						SELECT patient_id, has_anomaly
-						FROM patient_daily_analytics
-						WHERE patient_id = ANY(:ids) AND record_date = :d
-					"""),
-					{"ids": day_patient_ids, "d": target_date},
-				).fetchall()
+			rows2 = db.execute(
+				text("""
+					SELECT DISTINCT ON (patient_id) patient_id, has_anomaly
+					FROM patient_daily_analytics
+					WHERE patient_id = ANY(:ids)
+					ORDER BY patient_id, record_date DESC
+				"""),
+				{"ids": day_patient_ids},
+			).fetchall()
 			anomaly_by_patient = {r.patient_id: r.has_anomaly for r in rows2}
 		except Exception:
 			anomaly_by_patient = {}   # 캐시 조회 실패해도 대시보드는 정상 반환 (best-effort)
