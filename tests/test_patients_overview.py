@@ -28,19 +28,19 @@ def test_overview_has_anomaly_reflects_latest_gold_cache(
     # 과거 계산일(이상 없음)
     db_session.execute(text("""
         INSERT INTO patient_daily_analytics
-            (patient_id, record_date, trend_json, anomaly_json, correlation_json, eda_json,
+            (patient_id, record_date, window_days, trend_json, anomaly_json, correlation_json, eda_json,
              has_anomaly, anomaly_attrs)
         VALUES
-            (:pid, :rdate, '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, FALSE, ARRAY[]::text[])
+            (:pid, :rdate, 30, '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, FALSE, ARRAY[]::text[])
     """), {"pid": assigned_patient.id, "rdate": older_date})
 
     # 가장 최근 계산일(이상 있음) -- 목록은 이 값만 반영해야 함
     db_session.execute(text("""
         INSERT INTO patient_daily_analytics
-            (patient_id, record_date, trend_json, anomaly_json, correlation_json, eda_json,
+            (patient_id, record_date, window_days, trend_json, anomaly_json, correlation_json, eda_json,
              has_anomaly, anomaly_attrs)
         VALUES
-            (:pid, :rdate, '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, TRUE, ARRAY['body_weight_kg'])
+            (:pid, :rdate, 30, '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, TRUE, ARRAY['body_weight_kg'])
     """), {"pid": assigned_patient.id, "rdate": latest_date})
     db_session.commit()
 

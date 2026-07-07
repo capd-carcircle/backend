@@ -28,10 +28,10 @@ def _insert_record(db_session, patient_id, record_date):
 def _insert_gold_cache(db_session, patient_id, record_date, has_anomaly: bool):
     db_session.execute(text("""
         INSERT INTO patient_daily_analytics
-            (patient_id, record_date, trend_json, anomaly_json, correlation_json, eda_json,
+            (patient_id, record_date, window_days, trend_json, anomaly_json, correlation_json, eda_json,
              has_anomaly, anomaly_attrs)
         VALUES
-            (:pid, :rdate, '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, :ha, ARRAY[]::text[])
+            (:pid, :rdate, 30, '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, :ha, ARRAY[]::text[])
     """), {"pid": patient_id, "rdate": record_date, "ha": has_anomaly})
     db_session.commit()
 

@@ -96,6 +96,7 @@ _ANALYTICS_TABLES_SQL = [
         id                  BIGSERIAL PRIMARY KEY,
         patient_id          BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         record_date         DATE NOT NULL,
+        window_days         INTEGER NOT NULL,
         trend_json          JSONB,
         anomaly_json        JSONB,
         correlation_json    JSONB,
@@ -104,7 +105,7 @@ _ANALYTICS_TABLES_SQL = [
         anomaly_attrs       TEXT[],
         computed_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        CONSTRAINT uq_patient_daily_analytics UNIQUE (patient_id, record_date)
+        CONSTRAINT uq_patient_daily_analytics UNIQUE (patient_id, record_date, window_days)
     );
     """,
     "CREATE INDEX IF NOT EXISTS idx_pdm_patient_date ON patient_daily_metrics (patient_id, record_date DESC);",
