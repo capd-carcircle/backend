@@ -146,6 +146,7 @@ def save_survey_responses(
 )
 def get_my_survey_responses(
     record_id: int,
+    history: bool = False,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -165,25 +166,44 @@ def get_my_survey_responses(
     )
     resp_map = {(r.question_id, r.question_type): r for r in responses}
 
-    # active 공통질문 전체 조회 (answered 필드로 응답 여부 구분)
-    from sqlalchemy import or_ as _or
-    _assigned_q_ids = (
-        db.query(QuestionPatientAssignment.question_id)
-        .filter(QuestionPatientAssignment.patient_id == current_user.id)
-        .subquery()
-    )
-    common_qs = (
-        db.query(CommonQuestion)
-        .filter(
-            CommonQuestion.is_active == True,
-            _or(
-                CommonQuestion.target_all_patients == True,
-                CommonQuestion.id.in_(_assigned_q_ids),
-            ),
+    if history:
+        # 과거 기록 열람용(history=true — RecordListPage "질문/답변 보기" 모달 전용).
+        # 지금 활성인 공통질문 목록이 아니라, 이 기록에 실제 응답이 남아있는 공통질문만
+        # 표시(당시 질문 기준). 그 뒤 질문이 추가/비활성화돼도 무관하게 그때 실제로
+        # 주고받은 Q&A만 보여줌 — 응답 안 한 게 아닌데 "미응답"으로 잘못 보이는 문제 방지.
+        # (2026-06-26 f663552에서 한 번 고쳤다가 같은 날 9a91765로 원복됨 — 원복 사유는
+        #  이 로직을 활성 설문 작성 흐름(CommonSurveyPage)에도 그대로 적용해서 아직 응답
+        #  없는 신규 기록엔 질문이 0개로 보여 설문 진행 자체가 막혔기 때문. 이번엔 쿼리
+        #  파라미터로 완전히 분리해서 CommonSurveyPage 쪽 동작(history 미지정, 기존과 동일)은
+        #  전혀 안 건드림.)
+        common_responded_ids = {qid for (qid, qt) in resp_map if qt == "common"}
+        common_qs = (
+            db.query(CommonQuestion)
+            .filter(CommonQuestion.id.in_(common_responded_ids))
+            .order_by(CommonQuestion.created_at.asc())
+            .all()
+        ) if common_responded_ids else []
+    else:
+        # 설문 작성/수정 중 — 지금 답변해야 할 활성 공통질문 전체를 보여줘야
+        # 아직 안 답한 것도 채울 수 있음(CommonSurveyPage가 이 분기를 사용).
+        from sqlalchemy import or_ as _or
+        _assigned_q_ids = (
+            db.query(QuestionPatientAssignment.question_id)
+            .filter(QuestionPatientAssignment.patient_id == current_user.id)
+            .subquery()
         )
-        .order_by(CommonQuestion.created_at.asc())
-        .all()
-    )
+        common_qs = (
+            db.query(CommonQuestion)
+            .filter(
+                CommonQuestion.is_active == True,
+                _or(
+                    CommonQuestion.target_all_patients == True,
+                    CommonQuestion.id.in_(_assigned_q_ids),
+                ),
+            )
+            .order_by(CommonQuestion.created_at.asc())
+            .all()
+        )
     common_out = []
     for q in common_qs:
         r = resp_map.get((q.id, "common"))
