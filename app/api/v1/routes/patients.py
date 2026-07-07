@@ -214,16 +214,31 @@ def list_patients_overview(
     # 환자별 가장 최근 계산일의 has_anomaly만 사용. 온디맨드 분석 리포트를
     # 한 번도 연 적 없는 환자는 캐시가 없어 배지가 표시되지 않음(정상 동작 —
     # 추후 Airflow 배치가 전체 환자를 매일 채우면서 자연히 해소됨).
+    #
+    # ⚠️ 같은 (patient_id, record_date)에도 window_days(7/30/90)별로 별도 행이
+    # 있을 수 있고, window가 좁을수록(예: 7일) 표본이 적어 더 민감하게 이상치로
+    # 잡힐 수 있음(2026-07-08 실데이터로 확인 — 같은 날짜에 window=7은 True,
+    # window=30/36은 False인 사례 발견). 예전엔 DISTINCT ON이 그중 아무 행이나
+    # 골라서 결과가 우연에 따라 들쭉날쭉했음 — "어느 window에서든 하나라도
+    # 이상치면 이상치로 표시"(bool_or)로 통일해서 안정적으로 만듦. 임상적으로도
+    # 안전한 쪽(과다검출 허용, 놓치지 않는 쪽)이 맞다고 판단(차원 확인).
     anomaly_patient_ids = list({a.patient_id for a in assignments} | {p.id for p in legacy_patients})
     anomaly_cache: Dict[int, Dict[str, Any]] = {}
     if anomaly_patient_ids:
         try:
             rows = db.execute(
                 text("""
-                    SELECT DISTINCT ON (patient_id) patient_id, record_date, has_anomaly
-                    FROM patient_daily_analytics
-                    WHERE patient_id = ANY(:ids)
-                    ORDER BY patient_id, record_date DESC
+                    WITH latest AS (
+                        SELECT patient_id, MAX(record_date) AS record_date
+                        FROM patient_daily_analytics
+                        WHERE patient_id = ANY(:ids)
+                        GROUP BY patient_id
+                    )
+                    SELECT l.patient_id, l.record_date, bool_or(a.has_anomaly) AS has_anomaly
+                    FROM latest l
+                    JOIN patient_daily_analytics a
+                      ON a.patient_id = l.patient_id AND a.record_date = l.record_date
+                    GROUP BY l.patient_id, l.record_date
                 """),
                 {"ids": anomaly_patient_ids},
             ).fetchall()

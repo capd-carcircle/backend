@@ -16,7 +16,8 @@ class DashboardRecordRow(BaseModel):
     unreviewed_ai_count:  int
     risk_level:           Optional[str]           # normal | caution | urgent | None(미완료)
     ai_summary:           Optional[str]           # AI 요약 (없으면 None)
-    has_anomaly:          Optional[bool] = None    # 해당 날짜 분석 리포트 캐시(Gold) 기준, 계산 이력 없으면 None
+    has_anomaly:          Optional[bool] = None    # "오늘" 조회일 때만 채워짐(현재상태 개념), 계산 이력 없으면 None
+    anomaly_record_date:  Optional[str] = None     # has_anomaly 판정 기준이 된 실제 기록 날짜(오늘과 다르면 "이전부터 지속" 의미)
 
 
 class PatientSummary(BaseModel):

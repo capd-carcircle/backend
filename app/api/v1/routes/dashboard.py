@@ -132,20 +132,35 @@ def get_dashboard(
 	# "가장 최근" 캐시를 조회해서 보여주고, 과거 날짜를 캘린더로 조회할 때는
 	# 애초에 조회하지 않고 항상 None(배지 없음) — 과거 기록 열람 화면에 "현재"
 	# 상태를 갖다 붙이면 오히려 그 날짜에 문제가 있었다는 것처럼 오인될 수 있음.
-	anomaly_by_patient: dict[int, bool] = {}
+	# ⚠️ 같은 (patient_id, record_date)에도 window_days(7/30/90)별로 별도 행이
+	# 있을 수 있고 window가 좁을수록 더 민감하게 이상치로 잡힐 수 있어서(실데이터로
+	# 확인됨, 2026-07-08), 그 날짜의 window 중 하나라도 이상치면 이상치로 보는
+	# bool_or 방식 사용(patients.py와 동일). anomaly_record_date도 같이 내려줘서
+	# 프론트에서 "오늘 새로 생긴 이상치"와 "예전부터 계속된 이상치"를 구분 가능.
+	anomaly_by_patient: dict[int, dict] = {}
 	day_patient_ids = list({rec.patient_id for rec, _ in day_records})
 	if day_patient_ids and target_date == date.today():
 		try:
 			rows2 = db.execute(
 				text("""
-					SELECT DISTINCT ON (patient_id) patient_id, has_anomaly
-					FROM patient_daily_analytics
-					WHERE patient_id = ANY(:ids)
-					ORDER BY patient_id, record_date DESC
+					WITH latest AS (
+						SELECT patient_id, MAX(record_date) AS record_date
+						FROM patient_daily_analytics
+						WHERE patient_id = ANY(:ids)
+						GROUP BY patient_id
+					)
+					SELECT l.patient_id, l.record_date, bool_or(a.has_anomaly) AS has_anomaly
+					FROM latest l
+					JOIN patient_daily_analytics a
+					  ON a.patient_id = l.patient_id AND a.record_date = l.record_date
+					GROUP BY l.patient_id, l.record_date
 				"""),
 				{"ids": day_patient_ids},
 			).fetchall()
-			anomaly_by_patient = {r.patient_id: r.has_anomaly for r in rows2}
+			anomaly_by_patient = {
+				r.patient_id: {"has_anomaly": r.has_anomaly, "record_date": r.record_date}
+				for r in rows2
+			}
 		except Exception:
 			anomaly_by_patient = {}   # 캐시 조회 실패해도 대시보드는 정상 반환 (best-effort)
 
@@ -167,7 +182,11 @@ def get_dashboard(
 			unreviewed_ai_count  = ai_counts.get(rec.id, 0),
 			risk_level           = rec.risk_level.value if rec.risk_level else None,
 			ai_summary           = rec.ai_summary,
-			has_anomaly          = anomaly_by_patient.get(rec.patient_id),
+			has_anomaly          = (anomaly_by_patient.get(rec.patient_id) or {}).get("has_anomaly"),
+			anomaly_record_date  = (
+				anomaly_by_patient[rec.patient_id]["record_date"].isoformat()
+				if rec.patient_id in anomaly_by_patient else None
+			),
 		)
 		for rec, patient in day_records
 	]
